@@ -1,0 +1,7 @@
+# Never commit catalog exports, DB dumps or secrets (repo is public)
+*.jsonl
+*.jsonl.gz
+*.sql
+*.csv
+.env*
+.dev.vars
