@@ -1,3 +1,8 @@
+> **SUPERSEDED (2026-10-04)** by `docs/SPORTPRO_CURRENT_STATE.md` and the other `docs/` files.
+> Correction: §0.6 / §B.3 said the 1,297 zero-inventory ACTIVE products "display as sold out". That is wrong.
+> 9,906 variants have inventory tracking disabled, and 1,489 ACTIVE products are purchasable (see `docs/SPORTPRO_CURRENT_STATE.md` §B.1).
+> Also: there are 26 supplier-tag values plus untagged products, not 27 tag values.
+
 # SPORTPRO MIGRATION & SUPPLIER-FIRST AUDIT
 
 Audit date: 2026-10-01 (UTC). Phase 1 (AUDIT) only.

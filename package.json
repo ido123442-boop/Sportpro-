@@ -1,0 +1,10 @@
+{
+  "name": "sportpro-supplier-first",
+  "private": true,
+  "type": "module",
+  "description": "Sportpro supplier-first core (pure, side-effect-free modules) and read-only audit tools",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "engines": { "node": ">=20" }
+}
