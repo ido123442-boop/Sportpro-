@@ -7,9 +7,11 @@
 // Approval never produces MANUAL_VERIFIED or supplier_ready: it produces
 // MAPPING_APPROVED, which is one input to the separate eligibility gate.
 
+// Tiers follow match.js classifyConfidence: >=0.95 AUTO_CANDIDATE, 0.90-0.949 HIGH_CONFIDENCE,
+// 0.75-0.899 MANUAL_REVIEW, <0.75 REJECT. EXACT/HIGH/REVIEW are the guard's names for the first three.
 export const APPROVAL_POLICY = Object.freeze({
-  minSingleApproveConfidence: 0.95, // HIGH or EXACT may be approved one at a time by the owner
-  batchTier: 'EXACT',               // batch approval: EXACT only
+  minSingleApproveConfidence: 0.90, // HIGH_CONFIDENCE or better may be approved one at a time by the owner
+  batchTier: 'EXACT',               // batch approval: exact identifier (AUTO_CANDIDATE) only
 });
 
 export const TIERS = Object.freeze({ EXACT: 'EXACT', HIGH: 'HIGH', REVIEW: 'REVIEW', NO_MATCH: 'NO_MATCH' });

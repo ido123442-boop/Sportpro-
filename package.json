@@ -4,7 +4,7 @@
   "type": "module",
   "description": "Sportpro supplier-first core (pure, side-effect-free modules) and read-only audit tools",
   "scripts": {
-    "test": "node --test test/*.test.js"
+    "test": "node --no-warnings --test test/*.test.js"
   },
   "engines": { "node": ">=20" }
 }

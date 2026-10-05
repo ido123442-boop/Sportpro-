@@ -39,4 +39,6 @@ export function shippingFor(supplier, { unitCost, grams, productType } = {}) {
   }
 }
 
+// For CONDITIONAL rules the condition was evaluated for a single-unit order (conditionSatisfied=true).
+// At order time the condition must be re-evaluated against the actual supplier cart.
 export const shippingKnown = (s) => s && (s.status === SHIPPING_STATUS.VERIFIED || s.status === SHIPPING_STATUS.CONDITIONAL) && s.cost !== null;

@@ -3,6 +3,7 @@
 // Usage: node tools/scan_suppliers.mjs <outDir> [supplierKey ...]
 import fs from 'node:fs';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 export const SUPPLIERS = {
   megasport:    { domain: 'www.megasport.co.il',    type: 'shopify' },
@@ -60,6 +61,26 @@ async function scanWoo(key, s, out) {
   return { ok: true, products: n };
 }
 
+// Per-variation detail for WooCommerce variable products (Store API, GET only).
+// Gives variation-level sku, stock, purchasability and price. Product-level stock is not enough.
+export async function enrichWooVariations(key, s, inFile, outFile) {
+  const lines = fs.readFileSync(inFile, 'utf8').split('\n').filter(Boolean);
+  const out = fs.createWriteStream(outFile);
+  let n = 0, failed = 0;
+  for (const l of lines) {
+    const rec = JSON.parse(l);
+    for (const v of rec.p.variations ?? []) {
+      const { status, body } = await getJson(`https://${s.domain}/wp-json/wc/store/v1/products/${v.id}`);
+      if (!body) { failed++; out.write(JSON.stringify({ supplier: key, parent: rec.p.id, id: v.id, error: status, fetched_at: new Date().toISOString() }) + '\n'); continue; }
+      out.write(JSON.stringify({ supplier: key, parent: rec.p.id, id: v.id, fetched_at: new Date().toISOString(), v: body }) + '\n');
+      n++;
+      await sleep(400);
+    }
+  }
+  out.end();
+  return { variations: n, failed };
+}
+
 async function main() {
   const outDir = process.argv[2];
   const keys = process.argv.slice(3).length ? process.argv.slice(3) : Object.keys(SUPPLIERS);
@@ -72,7 +93,13 @@ async function main() {
     out.end();
     return { supplier: k, ...s, started, finished: new Date().toISOString(), ...r };
   }));
+  if (process.env.WOO_VARIATIONS !== '0') {
+    await Promise.all(results.filter((r) => r.type === 'woo' && r.ok).map(async (r) => {
+      r.variation_enrichment = await enrichWooVariations(r.supplier, SUPPLIERS[r.supplier], path.join(outDir, `${r.supplier}.jsonl`), path.join(outDir, `${r.supplier}.variations.jsonl`));
+      r.variation_enrichment.finished = new Date().toISOString();
+    }));
+  }
   fs.writeFileSync(path.join(outDir, '_scan_summary.json'), JSON.stringify(results, null, 2));
   console.log(JSON.stringify(results, null, 1));
 }
-main();
+if (import.meta.url === pathToFileURL(process.argv[1]).href) main();

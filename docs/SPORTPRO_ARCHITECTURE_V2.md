@@ -1,154 +1,136 @@
-# SPORTPRO — Architecture V2 (Supplier-First)
+# SPORTPRO — Architecture V2 (Sellable-First)
 
-Status: **design, not implemented in production.** The pure core modules referenced here exist in `src/core/` with tests. Nothing in this document has been deployed.
+Status: **design + tested pure core; nothing deployed.** Code: `src/core/*` (98 tests), schema `migrations/0001_supplier_first.sql` (not applied), tools in `tools/`.
+
+```
+NEVER:  Supplier → Shopify → try to make automation work
+ALWAYS: Supplier → Supplier DB → Discovery → Match → Live Verification → Shipping → Pricing → Risk → SELLABLE GATE → Shopify
+```
+
+Shopify is an **output**. D1 is the system's source of truth. Supplier availability never comes from Shopify.
 
 ## 1. Principles
+1. **Fail closed.** UNKNOWN never becomes 0, true, AVAILABLE or a quantity.
+2. **One primary state per variant** from a closed set (13 states → 9 report groups A–I), fixed gate order.
+3. **Deterministic gates.** AI may propose (discovery, review suggestions, copy), never decide a gate.
+4. **Three separate decisions:** mapping approval ("same product?") ≠ listing approval ("sell it?") ≠ order approval ("buy from supplier?").
+5. **ONE WRITER** to Shopify: a single Worker job with a single least-privilege credential. Not Base44, not a Claude connector, not another app, not a script.
+6. **Append-only knowledge.** Supplier products/variants are never deleted (status only); prices, stock, decisions and audit are append-only (enforced by DB triggers).
+7. **Every write**: dry-run → diff → count → sample → owner approval → execute → post-check → rollback file.
 
-1. **The supplier catalog is the source of product truth. Shopify is a storefront.** A product is ACTIVE because it is SELLABLE, never the other way round.
-2. **Fail closed.** UNKNOWN never becomes 0, true or AVAILABLE. Missing evidence → blocked, with an explicit reason.
-3. **One primary state per variant**, from a closed set, decided by a fixed gate order. No variant falls between states.
-4. **Deterministic first.** Matching, pricing, shipping, stock and eligibility are pure functions over stored evidence. AI may *propose* (match suggestions, title/quality fixes) but never decides a gate.
-5. **Separate decisions:** mapping approval ("same product?") ≠ listing approval ("should we sell it?") ≠ order approval ("fulfill this order?").
-6. **Single Shopify writer.** One credential, one code path, and every bulk write goes through dry-run → diff → approval → execution log → rollback file.
-7. **Append-only history.** Supplier knowledge is never deleted; disappearance is a status.
+## 2. Data model — `migrations/0001_supplier_first.sql`
 
-## 2. Data model (D1, staging first)
-
-```
-suppliers(id, key, domain, platform, feed_url, status, checkout_verified_at, checkout_evidence_ref,
-          shipping_policy_id, onboarded_at)
-shipping_policies(id, supplier_id, rule_json, source_url, source_text, verified_at, expires_at, status)
-supplier_products(id, supplier_id, supplier_product_id, title, title_norm, product_type, url,
-          first_seen_at, last_seen_at, status[ACTIVE|UNAVAILABLE|STALE|REMOVED|BLOCKED], source_hash)
-supplier_variants(id, supplier_product_id, supplier_variant_id, sku, barcode, options_json, option_sig,
-          grams, cost, stock_status[AVAILABLE|UNAVAILABLE|UNKNOWN], price_checked_at, stock_checked_at,
-          first_seen_at, last_seen_at, last_available_at, status)
-supplier_observations(id, supplier_variant_id, observed_at, cost, stock_status, source_hash)   -- append-only
-shopify_variants(shopify_variant_id, shopify_product_id, sku, option_sig, price, status, inventory_tracked,
-          snapshot_at)                                                                         -- mirror, read-only
-mappings(id, shopify_variant_id UNIQUE, supplier_variant_id, tier[EXACT|HIGH|REVIEW], method, confidence,
-          evidence_json, evidence_hash, status[PROPOSED|REVIEW_REQUIRED|MAPPING_APPROVED|REJECTED|SUPERSEDED],
-          approved_by, approved_at)
-mapping_events(id, mapping_id, at, actor, action, from_status, to_status, evidence_hash, ignored_fields)
-eligibility(shopify_variant_id PK, state, primary_reason, fix, inputs_hash, evaluated_at)
-eligibility_history(id, shopify_variant_id, at, state, primary_reason, inputs_hash)            -- append-only
-listing_proposals(id, batch_id, shopify_product_id, action[ACTIVATE|DRAFT|UPDATE_PRICE|...], before_json,
-          after_json, status[PROPOSED|APPROVED|APPLIED|ROLLED_BACK|REJECTED], approved_by, applied_at)
-shopify_write_log(id, batch_id, at, mutation, target_id, request_hash, response_status, before_json)
-```
-
-Constraints that encode safety:
-- `mappings.shopify_variant_id UNIQUE` among non-REJECTED rows, so one Shopify variant routes to exactly one supplier variant.
-- Partial unique index on `(supplier_variant_id)` where `status='MAPPING_APPROVED'`, which prevents duplicate listings.
-- `listing_proposals` can only be APPLIED if APPROVED, and `shopify_write_log` must hold a `before_json` (enabling rollback).
-
-The canonical identity is the chain `supplier_variant` ↔ `mapping` ↔ `shopify_variant`. Shopify is never used as the supplier master.
-
-## 3. SELLABLE contract
-
-A variant is **SELLABLE** iff **all** hold:
-
-| # | Condition | Evidence | Freshness |
+| | Table | Purpose | Enforced by schema (tested in `test/schema.test.js`) |
 |---|---|---|---|
-| 1 | Shopify record valid: not archived, price > 0 | Shopify mirror | snapshot ≤ 24 h |
-| 2 | Supplier tag resolves to an **onboarded** supplier with a working feed | `suppliers` | last scan ok |
-| 3 | Supplier data fresh | `price_checked_at`, `stock_checked_at` | ≤ 24 h |
-| 4 | Exactly one supplier variant matched (identity, size, color) | `mappings` | — |
-| 5 | No duplicate supplier mapping; no SKU/title conflict | `mappings` uniqueness | — |
-| 6 | Supplier variant `stock_status = AVAILABLE` (quantity is not used) | `supplier_variants` | ≤ 24 h |
-| 7 | Shipping cost known (VERIFIED or CONDITIONAL with an evaluable condition) | `shipping_policies` | ≤ 30 d |
-| 8 | Profit passes: net ≥ 10 ₪ **and** margin ≥ 4% (fees 4.5% + 1 ₪) | `pricing.js` | computed now |
-| 9 | Shopify data fixable defects resolved (unique SKU, images) | Shopify mirror | — |
-| 10 | Mapping approved: tier EXACT recorded, or HIGH approved by owner | `mappings.status` | — |
-| 11 | Supplier checkout path verified (pilot order with evidence) | `suppliers.checkout_verified_at` | ≤ 90 d |
-| 12 | No risk block (kill-switch-independent; supplier not BLOCKED) | `suppliers.status` | — |
+| A | `supplier_catalog` | Supplier registry | `checkout_verified=1` requires evidence ref; `CHECKOUT_VERIFIED` requires verified flag |
+| B | `supplier_products` | Raw + normalized product | Never deleted (trigger); status ACTIVE/UNAVAILABLE/STALE/REMOVED/BLOCKED |
+| C | `supplier_variants` | Raw + normalized variant | Never deleted (trigger); unique (supplier, variant id) |
+| D | `supplier_prices` | Price observations | Append-only; price > 0 |
+| E | `supplier_stock` | Stock observations | Append-only; **tri-state only** (no quantity possible) |
+| F | `supplier_shipping` | Versioned policy + evidence | VERIFIED/CONDITIONAL require source URL + verified_at |
+| G | `product_matches` | Shopify variant ↔ supplier variant | One active mapping per Shopify variant; one approved listing per supplier variant; MANUAL_REVIEW/REJECT cannot be approved; approval needs approver |
+| H | `verification_runs` | Live checks | url_ok, variant_exists, tri-state stock, price, currency |
+| I | `pricing_decisions` | Versioned pricing result | pass requires known shipping |
+| J | `sellable_decisions` | Gate result history | Append-only; non-SELLABLE needs reason; SELLABLE requires match + verification + pricing refs; state from closed set |
+| K | `shopify_listings`, `shopify_sync_queue` | Snapshot + single-writer queue | `decision_id` unique (idempotent enqueue); APPLIED requires approval; rollback_json required |
+| — | `sku_proposals` | SKU recovery | approval_required always 1; cannot approve with a collision |
+| L | `orders` | Shopify orders | Unique Shopify order id (duplicate webhook → no second row) |
+| M | `supplier_orders` | Procurement | Unique idempotency key; PURCHASED+ requires order number + transaction confirmation + stage-2 approval + purchased_at; stage 2 cannot precede stage 1 |
+| N | `audit_log` | Every action | Append-only (no UPDATE/DELETE) |
 
-### 3.1 States and gate order (first failing gate wins)
+## 3. Supplier registry
+`src/core/registry.js` + `audit/supplier_registry.csv`: for each of 12 suppliers, supplier_id, name, domain, catalog_method, catalog/product/variant feed, price/stock availability, stock granularity, SKU/barcode/size/color availability, shipping policy/source/verified_at, checkout method, checkout_verified (**false for all**), status, last_scan_at, freshness TTL (24 h), risk level. Unknown fields are literally `UNKNOWN`.
 
-| Order | State | Primary reasons |
-|---|---|---|
-| 1 | INVALID | PRODUCT_ARCHIVED, INVALID_PRICE |
-| 2 | SUPPLIER_REQUIRED | NO_SUPPLIER_TAG, NO_PUBLIC_CATALOG_FEED, SUPPLIER_NOT_ONBOARDED, SUPPLIER_UNIDENTIFIED, PERSONAL_IMPORT_NO_SUPPLIER, OWN_BRAND_SOURCE_UNKNOWN, SUPPLIER_FEED_FAILED |
-| 3 | STALE | SUPPLIER_DATA_STALE |
-| 4 | MAPPING_REQUIRED | NO_PRODUCT_MATCH, OPTION_NOT_OFFERED_BY_SUPPLIER, SHOPIFY_COLLAPSED_VARIANTS, SUPPLIER_HAS_NO_VARIANTS, AMBIGUOUS_PRODUCT, AMBIGUOUS_VARIANT, AMBIGUOUS_SKU, SKU_TITLE_CONFLICT, SKU_OPTIONS_MISMATCH |
-| 5 | RISK_BLOCKED | DUPLICATE_SUPPLIER_MAPPING, SKU_CONFLICTS_WITH_MATCH |
-| 6 | STOCK_BLOCKED | STOCK_UNAVAILABLE, STOCK_UNKNOWN |
-| 7 | SHIPPING_BLOCKED | SHIPPING_UNKNOWN:*, SHIPPING_EXCEPTION:* |
-| 8 | PROFIT_BLOCKED | PROFIT_BELOW_MIN, MARGIN_BELOW_MIN, SUPPLIER_COST_UNKNOWN |
-| 9 | DATA_FIX | DUPLICATE_SKU, NO_IMAGES |
-| 10 | OWNER_APPROVAL | MAPPING_NEEDS_OWNER_APPROVAL (HIGH tier) |
-| 11 | AUTO_READY | AWAITING_MAPPING_RECORD (EXACT tier), CHECKOUT_UNVERIFIED |
-| 12 | SELLABLE | — |
-| — | UNKNOWN | EVALUATION_ERROR (must be 0; alert if not) |
+## 4. Matching engine — `src/core/match.js`
 
-Implemented in `src/core/eligibility.js`; every gate has a unit test in `test/core.test.js`.
-
-### 3.2 Matching (deterministic, `tools/audit_catalog.mjs` → to be moved to `src/core/match.js`)
-
-| Tier | Rule | Who may approve |
-|---|---|---|
-| EXACT | Supplier SKU equals Shopify SKU (narrowed by size/color signature when the supplier reuses SKUs per style), with no contradicting title/options evidence | Recording is automatic; listing still needs approval in pilot |
-| HIGH | Same supplier, unique exact normalized title, unique exact option signature (confidence 0.95) | Owner, one at a time |
-| REVIEW | Anything else (ambiguous, conflicting, partial) | Owner only after new evidence raises the tier; `acknowledge_low_conf` is never accepted |
-
-Normalization (`src/core/normalize.js`): NFKC, bidi stripping, Hebrew/English punctuation, fractional EU sizes (`41 1/3` → `41.33`, `41⅔` → `41.67`), `EU`/`UK`/`מידה` prefixes, `Default`/`Default Title` ignored. Size *systems* (EU↔UK) are **not** auto-converted; that needs a per-brand chart and is a REVIEW item.
-
-### 3.3 Approval guard
-`src/core/approvalGuard.js`; see SAFETY_AUDIT §3.
-
-## 4. Pipeline and agents
-
-```
- [Scheduler]
-   │ 00:00 supplier scan (per supplier, rate-limited, GET-only)   → supplier_products/variants (+observations)
-   │ 01:00 match (deterministic)                                   → mappings (PROPOSED / REVIEW_REQUIRED)
-   │ 02:00 shipping policy re-verify (weekly) + cost/stock refresh  → supplier_variants
-   │ 03:00 profit + eligibility                                    → eligibility (+history)
-   │ 04:00 listing diff                                            → listing_proposals (DRY RUN)
-   └ owner approves batch on /admin/catalog → single Shopify writer → shopify_write_log (+rollback)
-```
-
-| Agent | Kind | Writes to | Never does |
+| Priority | Method | Confidence | Class |
 |---|---|---|---|
-| Supplier discovery | deterministic scanner (+ AI only to *suggest* new suppliers) | supplier_* | Shopify writes |
-| Matching | deterministic; AI may *suggest* REVIEW candidates with evidence | mappings (PROPOSED) | approve |
-| Stock/price validator | deterministic | supplier_variants, observations | guess quantities |
-| Shipping engine | deterministic rule table + evidence | shipping_policies | turn UNKNOWN into 0 |
-| Profit engine | deterministic | eligibility inputs | invent market prices |
-| Quality agent | AI-assisted proposals (title/Hebrew/SEO) | listing_proposals (UPDATE) | publish |
-| Eligibility gate | deterministic | eligibility | — |
-| Listing agent | deterministic diff | listing_proposals | write without approval |
-| Maintenance | deterministic: SELLABLE → TEMPORARILY_BLOCKED on stock loss, back on return after fresh validation | eligibility, proposals | delete history |
+| 1 | Exact supplier SKU (narrowed by size/color when the supplier reuses SKUs per style) | 1.00 | AUTO_CANDIDATE |
+| 2 | Exact barcode | 1.00 | AUTO_CANDIDATE |
+| 3 | Normalized SKU (punctuation/spacing) | 0.97 | AUTO_CANDIDATE |
+| 4 | Brand + model code + exact size + exact color | 0.95 | AUTO_CANDIDATE |
+| 5 | Brand + model code + exact size (color/width unverified) | 0.92 | HIGH_CONFIDENCE |
+| 6 | Normalized title + exact options | 0.93 | HIGH_CONFIDENCE |
+| 6b | Normalized title + exact size only | 0.90 | HIGH_CONFIDENCE |
+| 7 | Compatible size mapping (2XL↔XXL, one-size↔default) | 0.85 | MANUAL_REVIEW |
+| 8 | Fuzzy title (Jaccard, same brand) | ≤ 0.85 | MANUAL_REVIEW / REJECT |
 
-## 5. Shopify listing policy
+Classes: ≥0.95 AUTO_CANDIDATE · 0.90–0.949 HIGH_CONFIDENCE · 0.75–0.899 MANUAL_REVIEW · <0.75 REJECT. **AUTO_CANDIDATE ≠ SELLABLE.** Contradictions (SKU vs options, SKU vs title) → CONFLICT; several equal candidates → AMBIGUOUS. Each match carries confidence, method and evidence (supplier product/variant, size, color, brand, model).
 
-- Initial rollout: `ACTIVATE` proposals only for SELLABLE variants. A product is ACTIVE when ≥ 1 variant is SELLABLE; non-SELLABLE variants of an ACTIVE product must be unpurchasable (tracked inventory, qty 0, `DENY`).
-- `DRAFT` proposals for ACTIVE products with zero SELLABLE variants. This is currently **all 1,947**, because nothing is SELLABLE until the checkout pilot passes. This is a policy decision for the owner: during the pilot, the store would show only pilot products.
-- Every proposal batch: count, sample, diff, owner approval, execution, post-check, rollback file.
-- Price updates are proposals too (never silent).
+## 5. SELLABLE gate — `src/core/eligibility.js`
 
-## 6. What to keep / replace
+SELLABLE ⇔ supplier exists & onboarded & not blocked ∧ match class AUTO_CANDIDATE/HIGH_CONFIDENCE ∧ (HIGH requires owner approval) ∧ mapping recorded ∧ live-verified (variant exists, URL ok, ILS) ∧ data ≤ 24 h ∧ stock = AVAILABLE ∧ shipping VERIFIED/CONDITIONAL with condition satisfied ∧ profit ≥ 10 ₪ ∧ margin ≥ 4% ∧ no duplicate mapping ∧ data defects fixed ∧ supplier checkout verified.
 
-| Keep | Replace |
-|---|---|
-| Auth-before-routing on `/api/*` | Client-supplied `acknowledge_low_conf` and `approved_by` |
-| Two-stage order approval with purchase evidence (order number + transaction confirmation) | Toggle-style kill switch → explicit `{active:true|false}` with confirmation |
-| Kill switch concept, Durable Object idempotency (once source is recovered and tested) | Synthetic Shopify quantities and untracked inventory as the availability signal |
-| `/verify`, `/orders`, `/admin` separation | Supplier identity as a free-text tag → stored supplier_variant mapping |
-| The pricing formula (verified in `pricing.js`) | Four Shopify writer apps → one least-privilege writer |
-| Existing D1 history (mappings, audit, candidates): migrate, never drop | Shopify-first activation (products ACTIVE without supply evidence) |
+| Order | State | Group | Examples of primary reason |
+|---|---|---|---|
+| 1 | INVALID | H | PRODUCT_ARCHIVED, INVALID_PRICE |
+| 2 | SUPPLIER_REQUIRED | G | NO_SUPPLIER_TAG, SUPPLIER_BLOCKED, NO_PUBLIC_CATALOG_FEED, SUPPLIER_NOT_ONBOARDED |
+| 3 | MAPPING_REQUIRED | C | NO_PRODUCT_MATCH, OPTION_NOT_OFFERED_BY_SUPPLIER, MATCH_NEEDS_MANUAL_REVIEW, SUPPLIER_VARIANT_GONE |
+| 4 | RISK_BLOCKED | H | DUPLICATE_SUPPLIER_MAPPING, CURRENCY_NOT_ILS, SUPPLIER_URL_BROKEN |
+| 5 | STALE | I | SUPPLIER_DATA_STALE |
+| 6 | STOCK_BLOCKED | D | STOCK_UNAVAILABLE, STOCK_UNKNOWN |
+| 7 | SHIPPING_BLOCKED | E | SHIPPING_UNKNOWN:*, SHIPPING_EXCEPTION:*, SHIPPING_CONDITION_NOT_MET |
+| 8 | PROFIT_BLOCKED | F | PROFIT_BELOW_MIN, MARGIN_BELOW_MIN |
+| 9 | DATA_FIX | B | DUPLICATE_SKU, NO_IMAGES |
+| 10 | STALE | I | LIVE_CHECK_REQUIRED |
+| 11 | OWNER_APPROVAL | B | MAPPING_NEEDS_OWNER_APPROVAL |
+| 12 | AUTO_READY | B | AWAITING_MAPPING_RECORD, CHECKOUT_UNVERIFIED |
+| 13 | SELLABLE | A | — |
+| — | UNKNOWN | I | EVALUATION_ERROR (alert if > 0) |
 
-## 7. Roadmap (not started)
+## 6. Pricing — `src/core/pricing.js`
+Policy `B-2026-10-04` (versioned): fees 2.5% + 2% + 1 ₪; min profit 10 ₪; min margin 4%; max markup 35%; charm `.90`. **Markup tiers 15/13/12/10% are named in Policy B but their cost-band boundaries were never documented → not applied (UNKNOWN).** `minProfitablePrice()` gives the lowest charm price that passes both floors; if it exceeds cost × 1.35, the item is **structurally unprofitable** under policy. No market ceiling is ever invented.
 
-| Phase | Deliverable | Exit criterion |
+## 7. Shipping — `src/core/shipping.js`
+Per-supplier rule with source URL and date. Conditional free shipping is evaluated for a single-unit order and **re-evaluated against the real supplier cart at order time**. UNKNOWN / EXCEPTION → SHIPPING_BLOCKED. Policies older than 30 days → re-verify.
+
+## 8. Shopify sync — `src/core/syncPlanner.js`
+`shopify_sync_queue` rows: product/variant, current, desired, reason, evidence, decision_id (deterministic hash), policy, generated_at, rollback.
+- **STRICT:** product ACTIVE ⇔ ≥ 1 SELLABLE variant.
+- **RISK_MINIMUM:** draft only ACTIVE products whose every purchasable variant is supplier-UNAVAILABLE or loss-making; activates nothing.
+- Before execution: `reconcileBeforeWrite` skips rows already applied and refuses rows whose live state drifted. After a partial failure, `rollbackSet` returns exactly the applied rows.
+- Rollback for status changes must also restore **sales-channel publications** (drafting unpublished products from Online Store / POS on 2026-10-01). Capture `resourcePublications` per product immediately before any write.
+
+## 9. Multi-agent product system
+
+| Agent | Kind | Reads | Writes | Never |
+|---|---|---|---|---|
+| 1 Supplier discovery | AI-assisted search + deterministic feed probe (`/products.json`, Woo Store API) | web | `supplier_catalog` (status CANDIDATE) | onboard a supplier without catalog + shipping + checkout evidence |
+| 2 Product discovery | deterministic ranking of supplier catalog: brand, price band, availability, min profitable price ≤ cap, shipping known, category | supplier_* | candidate list (`supplier_opportunities`) | invent demand (demand = UNKNOWN until real data) |
+| 3 Matching | deterministic `match.js`; AI may *suggest* evidence for MANUAL_REVIEW | supplier_*, Shopify mirror | `product_matches` (PROPOSED/REVIEW_REQUIRED) | approve |
+| 4 Live verification | deterministic GET per variant (`live_verify.mjs`) | supplier sites | `verification_runs`, prices, stock | guess stock or quantity |
+| 5 Profit | deterministic `pricing.js` | runs + shipping | `pricing_decisions` | invent market prices |
+| 6 Quality/risk | deterministic checks (duplicate, wrong size/brand/variant, stale, missing image/SKU) + AI copy suggestions | all | `sellable_decisions`, `sku_proposals` | write to Shopify |
+| 7 Catalog manager | deterministic diff of SELLABLE vs Shopify | sellable_decisions | `shopify_sync_queue` (PROPOSED) → after owner approval → **the single writer** | search for products; publish anything not SELLABLE |
+
+Product pipeline (no shortcuts): `DISCOVERED → CANDIDATE → MATCHED → LIVE_VERIFIED → SHIPPING_VERIFIED → PRICED → PROFIT_VERIFIED → RISK_VERIFIED → OWNER_APPROVAL/AUTO_APPROVED → READY_TO_PUBLISH → SHOPIFY_ACTIVE`.
+
+## 10. Automation (cron, after stabilization)
+
+| UTC | Job | Output |
 |---|---|---|
-| 0 ✔ (this) | Facts: Shopify + supplier truth, classification, safety findings | Docs + exports exist |
-| 0b | **Access:** Cloudflare read token, Worker admin read token; locate Worker source; make repo private | Source in git; D1 schema + counts + kill switch value read; staging/prod bindings documented |
-| 1 | **Freeze writers:** inventory of the 4 Shopify apps; revoke or rotate all but one; owner decision on R1/R2 (loss-making / unavailable purchasable items) | Exactly one writer credential; R1/R2 decision recorded |
-| 2 | **Backups:** D1 export (staging + prod), Shopify snapshot (exists), pricing/shipping policy snapshot | sha256 manifest stored privately |
-| 3 | **Supplier master in staging D1:** schema §2, import today's scan, nightly scan | 10 suppliers ingested; observations accumulating |
-| 4 | **Reconcile** D1 legacy mappings (715) with audit proposals (8,788); approval guard deployed to staging | Diff report: agree / disagree / legacy-only / new |
-| 5 | **Pilot checkout:** 1 supplier (Footlocker has the most AUTO_READY), 1 product, 1 real order, manual procurement, tracking, fulfillment | `checkout_verified_at` set with evidence |
-| 6 | **Listing proposals → small batch** (e.g. 20 SELLABLE products) owner-approved | Post-check matches diff; rollback tested |
-| 7 | Webhook/order path re-tested end-to-end in staging (HMAC, duplicates, kill switch) | Tests executed and logged, not assumed |
-| 8 | Controlled scale: batch size grows only while fulfillment success holds | Metrics in supplier health dashboard |
+| 00:00 | Supplier catalog refresh (all feeds, rate-limited) | supplier_products/variants, prices, stock |
+| 01:00 | Matching refresh | product_matches |
+| 02:00 | Live verification of every currently-ACTIVE and every candidate variant | verification_runs |
+| 03:00 | Shipping policy check (weekly re-verify; expiry 30 d) | supplier_shipping |
+| 03:30 | Profit recalculation | pricing_decisions |
+| 04:00 | SELLABLE gate | sellable_decisions |
+| 04:30 | Sync diff (SELLABLE → TEMPORARILY_BLOCKED on stock loss; back after fresh validation) | shopify_sync_queue (PROPOSED) |
+| — | Owner approves batch → single writer applies → post-check | shopify_write_log |
+| every 15 min | Stale sweep: any ACTIVE variant whose last verification > TTL → proposal to block | queue |
+
+## 11. Order flow — `src/core/orderGate.js`
+```
+Shopify order → webhook (HMAC verified) → orders (unique id) → payment PAID? → supplier + variant from APPROVED mapping
+→ LIVE stock (AVAILABLE) → LIVE price (≤ +5% vs mapping, ILS) → shipping known → profit pass → PROCEED_TO_DRAFT
+→ OWNER APPROVAL 1 → supplier cart → OWNER APPROVAL 2 → supplier checkout (human) → evidence (order no. + transaction) → PURCHASED
+→ tracking → Shopify fulfillment → customer
+```
+Any failure → STOP, no purchase. Unknown kill-switch state counts as ON. Tests cover: kill switch, HMAC, duplicate order line, payment pending, no approved mapping, stale live check, unavailable/unknown stock, price jump, unknown shipping, unprofitable line, missing purchase evidence, stage-2 missing, double purchase, checkout failure.
+
+## 12. Pilot and growth
+Pilot ladder: **10 → 25 → 50 → 100 → 250 → 500** products. Step up only with **0 loss, 0 wrong supplier, 0 wrong variant, 0 unavailable purchase, 0 mapping errors** at the previous step.
+Metrics: verified sellable; average/median net profit; average margin; supplier availability; mapping accuracy; order success; supplier checkout success; refund rate; cancellation rate; stale rate; **SELLABLE COVERAGE = verified sellable variants / total candidate variants**.
+
+## 13. Dashboard (to build in the Worker admin)
+Tiles: TOTAL DISCOVERED · MATCHED · LIVE VERIFIED · SELLABLE · BLOCKED · NO SUPPLIER · NO STOCK · NO SHIPPING · PROFIT BLOCKED · DATA QUALITY · STALE. Lists: top 100 to fix / to publish / by profit / by confidence / supplier opportunities. Every row shows **WHY SELLABLE** or **WHY BLOCKED** (state, primary reason, fix, evidence link, last check). The audit already produces these lists as CSV.

@@ -5,3 +5,6 @@
 *.csv
 .env*
 .dev.vars
+# tracked exceptions (schema and names-only env template)
+!migrations/*.sql
+!.env.example
