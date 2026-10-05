@@ -8,3 +8,6 @@
 # tracked exceptions (schema and names-only env template)
 !migrations/*.sql
 !.env.example
+dashboard/*.html
+audit/dashboard_data.json
+audit/live_candidates.json

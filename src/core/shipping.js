@@ -14,7 +14,9 @@ export const SHIPPING_RULES = Object.freeze({
   bealion: { source: 'https://www.bealion.co.il/ (site banner)', checkedAt: '2026-10-04', text: 'משלוח חינם בקניה מעל 249₪; below threshold: not published' },
 });
 
-export function shippingFor(supplier, { unitCost, grams, productType } = {}) {
+// All inputs must be SUPPLIER evidence (never the Shopify listing's own product type).
+// division: supplier category tag (MegaSport 'DIVISION:APPAREL|footwear|equipment|...').
+export function shippingFor(supplier, { unitCost, grams, productType, division } = {}) {
   const r = SHIPPING_RULES[supplier];
   const S = SHIPPING_STATUS;
   const unknown = (rule) => ({ status: S.UNKNOWN, cost: null, rule, source: r?.source ?? null });
@@ -29,9 +31,13 @@ export function shippingFor(supplier, { unitCost, grams, productType } = {}) {
       if (!(grams > 0)) return unknown('WEIGHT_UNKNOWN');
       if (grams > 20000) return { status: S.EXCEPTION, cost: null, rule: 'OVERSIZE_OVER_20KG', source: r.source };
       return { status: S.CONDITIONAL, cost: 35, rule: 'HOME_35_UP_TO_20KG', source: r.source };
-    case 'megasport':
-      if (unitCost >= 300 && MEGASPORT_APPAREL_FOOTWEAR.test(productType ?? '')) return { status: S.CONDITIONAL, cost: 0, rule: 'FREE_OVER_300_APPAREL_FOOTWEAR', source: r.source };
+    case 'megasport': {
+      const div = String(division ?? '').toLowerCase();
+      const apparelOrFootwear = div ? (div === 'apparel' || div === 'footwear') : MEGASPORT_APPAREL_FOOTWEAR.test(productType ?? '');
+      if (unitCost >= 300 && apparelOrFootwear) return { status: S.CONDITIONAL, cost: 0, rule: 'FREE_OVER_300_APPAREL_FOOTWEAR', source: r.source };
+      if (div && !apparelOrFootwear) return unknown('NON_APPAREL_DIVISION_COST_UNPUBLISHED');
       return unknown('BELOW_THRESHOLD_OR_NON_APPAREL_COST_UNPUBLISHED');
+    }
     case 'bealion':
       if (unitCost > 249) return { status: S.CONDITIONAL, cost: 0, rule: 'FREE_OVER_249', source: r.source };
       return unknown('BELOW_THRESHOLD_COST_UNPUBLISHED');

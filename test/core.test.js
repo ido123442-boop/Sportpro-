@@ -138,3 +138,11 @@ test('stock tri-state: Woo backorder / not purchasable is never AVAILABLE; missi
   assert.equal(shopifyStock(undefined), 'UNKNOWN');
   assert.equal(shopifyStock(2), 'UNKNOWN');
 });
+
+test('MegaSport free shipping uses supplier DIVISION, never the Shopify product type', () => {
+  assert.equal(shippingFor('megasport', { unitCost: 10699, productType: '', division: 'equipment' }).status, 'UNKNOWN');
+  assert.equal(shippingFor('megasport', { unitCost: 10699, productType: 'ביגוד', division: 'equipment' }).status, 'UNKNOWN');
+  assert.equal(shippingFor('megasport', { unitCost: 350, productType: '', division: 'APPAREL' }).cost, 0);
+  assert.equal(shippingFor('megasport', { unitCost: 350, productType: '', division: 'footwear' }).cost, 0);
+  assert.equal(shippingFor('megasport', { unitCost: 350, productType: '', division: 'Accessories and underwear' }).status, 'UNKNOWN');
+});

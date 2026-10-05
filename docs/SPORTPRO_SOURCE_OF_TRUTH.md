@@ -1,3 +1,5 @@
+> **Superseded for numbers (2026-10-05)** by `docs/SPORTPRO_SELLABLE_CATALOG_AUDIT.md` (new matching engine + live verification). Key corrections: AroSport "option not offered" was mostly a shoe-width dimension, not only a generic size grid; purchasable-but-supplier-unavailable is 3,391 and loss-making 1,673 (more variants are now matched); the Claude Shopify connector itself is one of the four writers.
+
 # SPORTPRO — Source of Truth
 
 Status: Phase 0 (audit / recovery). Snapshot time: **2026-10-04 15:57–16:01 UTC**.
@@ -59,8 +61,8 @@ Rule: when sources disagree, the higher rank wins for the fields it owns (sectio
 | `audit/supplier_tags.csv` | 27 rows (26 tags + untagged) with classification | No |
 | `audit/production_mutations.csv` | 38,904 product create/publish/unpublish/status/destroy events, 2026-07-15 → 2026-10-01 | No |
 | `audit/summary.json` | Aggregate counts | Yes |
-| `tools/scan_suppliers.mjs`, `tools/audit_catalog.mjs` | Reproducible read-only pipeline | Yes |
+| `tools/scan_suppliers.mjs`, `tools/rebuild.mjs`, `tools/live_verify.mjs` | Reproducible read-only pipeline | Yes |
 
 Note: the CSVs contain draft catalog, prices and inventory data. The GitHub repo `ido123442-boop/Sportpro-` is **public**, so they are git-ignored until the repo is made private. They exist in the working directory of this session (ephemeral container).
 
-To reproduce: `node tools/scan_suppliers.mjs <dir>/suppliers` → place Shopify bulk exports in `<dir>` → `node tools/audit_catalog.mjs <dir> audit`.
+To reproduce: `node tools/scan_suppliers.mjs <dir>/suppliers` → place Shopify bulk exports in `<dir>` → `node tools/rebuild.mjs <dir> audit` → `node tools/live_verify.mjs audit/live_candidates.json <dir>/live.jsonl` → `node tools/rebuild.mjs <dir> audit <dir>/live.jsonl`.

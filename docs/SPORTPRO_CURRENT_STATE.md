@@ -1,3 +1,5 @@
+> **Superseded for numbers (2026-10-05)** by `docs/SPORTPRO_SELLABLE_CATALOG_AUDIT.md` (new matching engine + live verification). Key corrections: AroSport "option not offered" was mostly a shoe-width dimension, not only a generic size grid; purchasable-but-supplier-unavailable is 3,391 and loss-making 1,673 (more variants are now matched); the Claude Shopify connector itself is one of the four writers.
+
 # SPORTPRO — Current State (Phase 0 audit)
 
 Snapshot: 2026-10-04 ~16:00 UTC. Labels: **VERIFIED / INFERRED / UNKNOWN / BLOCKED**.

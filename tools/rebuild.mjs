@@ -59,7 +59,8 @@ for (const S of SUPPLIERS) {
     let P;
     if (rec.platform === 'shopify') {
       P = { supplier: key, platform: 'shopify', productId: String(p.id), handle: p.handle, title: p.title, vendor: p.vendor || null, productType: p.product_type || '',
-        url: `https://${S.domain}/products/${p.handle}`, image: p.images?.[0]?.src ?? '', fetchedAt: rec.fetched_at, sourceHash, variants: [] };
+        url: `https://${S.domain}/products/${p.handle}`, image: p.images?.[0]?.src ?? '', fetchedAt: rec.fetched_at, sourceHash, variants: [],
+        division: (p.tags ?? []).find((t) => t.startsWith('DIVISION:'))?.slice(9) ?? null };
       for (const v of p.variants) {
         P.variants.push({ variantId: String(v.id), sku: v.sku || null, barcode: v.barcode || null, options: [v.option1, v.option2, v.option3].filter((x) => x != null),
           cost: Number(v.price) || null, currency: 'ILS', stockRaw: String(v.available), stock: shopifyStock(v.available), grams: v.grams || 0, fetchedAt: rec.fetched_at, liveMethod: null });
@@ -130,7 +131,7 @@ for (const v of variants) {
   const liveVerified = Boolean(run && (new Date(NOW) - new Date(run.checked_at)) / 36e5 <= 24);
   const cost = liveVerified && run.variant_exists ? run.price : sv?.cost ?? null;
   const stock = liveVerified ? run.stock : sv?.stock ?? 'UNKNOWN';
-  const ship = sv ? shippingFor(tag, { unitCost: cost, grams: sv.grams, productType: sv.product.productType || p.productType }) : null;
+  const ship = sv ? shippingFor(tag, { unitCost: cost, grams: sv.grams, productType: sv.product.productType, division: sv.product.division }) : null;
   if (ship) ship.conditionSatisfied = ship.cost !== null && (ship.status === 'VERIFIED' || ship.status === 'CONDITIONAL');
   const price = Number(v.price);
   const profit = sv ? evaluateProfit({ sellingPrice: price, supplierCost: cost, shippingCost: ship?.cost }) : null;
@@ -259,14 +260,17 @@ writeCsv('top500_fixes.csv', fixes.slice(0, 500));
 
 // ---------------- Supplier opportunities ----------------
 const mappedSupplierProducts = new Set([...matchByVariant.values()].filter((m) => m.sv).map((m) => `${m.sv.product.supplier}:${m.sv.product.productId}`));
+// supplier listings that are not physical products
+const NON_PRODUCT = /shipping protection|\binsurance\b|gift ?cards?|gift voucher|כרטיס מתנה|שובר מתנה|תו קנייה|voucher/i;
 const opps = [];
 for (const [key, idx] of Object.entries(IDX)) {
   for (const P of idx.products) {
     if (mappedSupplierProducts.has(`${key}:${P.productId}`)) continue;
+    if (NON_PRODUCT.test(`${P.title} ${P.productType}`)) continue; // gift cards, vouchers, shipping insurance
     const av = P.variants.filter((v) => v.stock === 'AVAILABLE' && v.cost > 0);
     if (!av.length) continue;
     const cost = Math.max(...av.map((v) => v.cost));
-    const ship = shippingFor(key, { unitCost: cost, grams: Math.max(...av.map((v) => v.grams || 0)), productType: P.productType });
+    const ship = shippingFor(key, { unitCost: cost, grams: Math.max(...av.map((v) => v.grams || 0)), productType: P.productType, division: P.division });
     if (ship.cost === null) continue;
     const mp = minProfitablePrice({ supplierCost: cost, shippingCost: ship.cost });
     if (!mp.feasible) continue;
@@ -311,10 +315,16 @@ writeCsv('supplier_catalog.csv', supplierVariantsAll.map((v) => ({
 // ---------------- DRY-RUN Shopify sync ----------------
 const syncInput = [...byProduct].map(([pid, vs]) => ({ productId: pid, title: vs[0].product_title, status: vs[0].shopify_status,
   variants: vs.map((r) => ({ variantId: r.variant_id, state: r.state, primaryReason: r.primary_reason, purchasable: r.purchasable_now, supplierStock: r.supplier_stock, profitNet: r.profit_net === '' || r.shipping_status === 'UNKNOWN' ? null : num(r.profit_net) })) }));
+// sales-channel publications backup (optional input publications.jsonl) so rollback restores channels too
+const PUBS = new Map();
+for (const o of readJsonl(path.join(dataDir, 'publications.jsonl'))) {
+  if (o.status) PUBS.set(o.id.split('/').pop(), []);
+  else PUBS.get(o.__parentId.split('/').pop())?.push(`${o.publication.id.split('/').pop()}:${o.publication.name}:${o.isPublished ? 1 : 0}`);
+}
 for (const pol of Object.values(SYNC_POLICIES)) {
   const { queue, rollback } = planSync(syncInput, { policy: pol, generatedAt: NOW });
   writeCsv(`shopify_sync_queue_${pol}.csv`, queue, ['product_id', 'title', 'current_state', 'desired_state', 'reason', 'evidence', 'policy', 'decision_id', 'generated_at']);
-  writeCsv(`rollback_${pol}.csv`, rollback, ['product_id', 'restore_status', 'decision_id']);
+  writeCsv(`rollback_${pol}.csv`, rollback.map((r) => ({ ...r, restore_publications: PUBS.has(r.product_id) ? PUBS.get(r.product_id).join(' | ') : 'MISSING_BACKUP' })), ['product_id', 'restore_status', 'restore_publications', 'decision_id']);
 }
 
 // live candidates for pass 2: group-B or would-be-B variants lacking live verification

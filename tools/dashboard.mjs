@@ -29,7 +29,9 @@ const html = `<title>Sportpro Sellable Catalog</title>
   --accent: #7fb2ec; --accent-soft: #1b2d42; --ok: #6fcf9c; --ok-soft: #15301f; --warn: #e6b75c; --warn-soft: #33270f; --bad: #f08a80; --bad-soft: #3a1a18; color-scheme: dark }
 * { box-sizing: border-box }
 body { background: var(--bg); color: var(--ink); font-family: var(--font-ui); font-size: 14px; line-height: 1.5 }
-.wrap { max-width: 1240px; margin: 0 auto; padding-inline: 16px; padding-block: 24px 48px; display: grid; gap: 28px }
+.wrap { max-width: 1240px; margin: 0 auto; padding-inline: 16px; padding-block: 24px 48px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 28px }
+.wrap > * { min-width: 0 }
+.meta { overflow-wrap: anywhere }
 header { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: baseline; justify-content: space-between }
 h1 { font-size: 1.6rem; margin: 0; font-weight: 700; text-wrap: balance }
 h2 { font-size: 1.05rem; margin: 0 0 10px; font-weight: 600 }
