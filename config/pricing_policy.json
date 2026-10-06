@@ -8,9 +8,45 @@
   "charm_suffix": ".90",
   "markup_tiers": {
     "status": "UNKNOWN",
-    "named_tiers_pct": [15, 13, 12, 10],
+    "named_tiers_pct": [
+      15,
+      13,
+      12,
+      10
+    ],
     "cost_band_boundaries_ils": null,
-    "note": "Policy B names these tiers, but the supplier-cost bands they apply to were never documented. Not applied until the owner sets cost_band_boundaries_ils."
+    "note": "Policy B names these tiers, but the supplier-cost bands they apply to were never documented. Not applied until the owner sets cost_band_boundaries_ils.",
+    "found_in_legacy_d1": {
+      "source": "staging D1 system_settings.pricing_rules (updated 2026-09-24)",
+      "bands": [
+        {
+          "min": 0,
+          "max": 100,
+          "markup_target_pct": 15
+        },
+        {
+          "min": 100,
+          "max": 250,
+          "markup_target_pct": 13
+        },
+        {
+          "min": 250,
+          "max": 500,
+          "markup_target_pct": 12
+        },
+        {
+          "min": 500,
+          "max": null,
+          "markup_target_pct": 10
+        }
+      ],
+      "legacy_rounding": "charm_up to ...9, max_round_up 5 ILS",
+      "status": "PENDING_OWNER_CONFIRMATION"
+    }
   },
-  "market_ceiling": { "status": "UNKNOWN", "source": null, "note": "Never invented; only applied when a reliable market price source exists." }
+  "market_ceiling": {
+    "status": "UNKNOWN",
+    "source": null,
+    "note": "Never invented; only applied when a reliable market price source exists."
+  }
 }

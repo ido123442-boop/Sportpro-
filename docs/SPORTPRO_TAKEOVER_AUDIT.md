@@ -202,3 +202,91 @@
 - **להסיר: 23 read שלא נדרשים**, כולל read_customers (מידע אישי של לקוחות).
 - **UNKNOWN:** האם ה-connector (אפליקציה של Shopify) מאפשר בחירת scopes בודדים. אם לא: לנתק אותו ולהקים custom app לקריאה בלבד ל-audit.
 - **הערה:** גם ייצוא bulk הוא קריאה בלבד מבחינת נתונים, ועובד עם read scopes.
+
+---
+
+## E. עדכון Cloudflare + D1 (2026-10-06 ~11:05–11:20 UTC, קריאה בלבד עם token של הבעלים)
+שיטה: Cloudflare API ‏(GET), ‏D1 `/query` עם `SELECT`/`PRAGMA` בלבד, אכיפה בקוד (`d1q.py` / `d1dump.py` דוחים כל משפט אחר). **שום כתיבה, deploy, שינוי secret, cron או הגדרה.**
+
+### E.1 Token
+- VERIFIED: הטוקן פעיל (`/user/tokens/verify`). חשבון אחד: `bf63e526…` ("Sportkaraspro@gmail.com's Account").
+- הרשאות הטוקן עצמו: BLOCKED. ‏`/user/tokens/{id}` החזיר Unauthorized.
+- ⚠️ הטוקן הודבק בצ'אט. **יש לבצע Roll/Revoke אחרי הסשן**, ולהגדיר טוקן חדש כמשתנה סביבה.
+
+### E.2 Workers (VERIFIED)
+| | production `sportpro-automation` | staging `sportpro-automation-staging` |
+|---|---|---|
+| נוצר / עודכן | 2026-08-11 / 2026-10-01 18:49 | 2026-09-24 / 2026-10-01 18:49 |
+| קוד | `index.js` 235,981B, sha256 `64991b27…` | **זהה byte-for-byte** |
+| handlers | `fetch` בלבד (כל 15 הגרסאות, מאז 08-11) | `fetch` בלבד |
+| cron | **`*/5 * * * *`**, נוצר 2026-10-01 07:29:39 | אין |
+| D1 binding | `sportpro-orders` (b936ce23) | `sportpro-orders-staging` (fa32a45c) |
+| Durable Object | ProcurementLock (105e3e75…) | ProcurementLock (4dd3f5b8…) |
+| secrets (שמות בלבד) | ADMIN_TOKEN, SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET, WEBHOOK_SECRET | אותם, **ועוד SHOPIFY_ADMIN_TOKEN** (הקוד לא משתמש בו: 0 הפניות) |
+| plain vars | SHOPIFY_SHOP_DOMAIN=xayj9j-q9.myshopify.com | **אותה חנות** |
+| deploys | wrangler, sportkaraspro@gmail.com | כנ"ל |
+| hardcoded secrets בקוד | אין (נסרק) | אין |
+
+- **ה-cron של production לא מריץ כלום** (VERIFIED). אין `scheduled` handler באף גרסה, כך שכל טריגר הוא no-op.
+- **staging ו-production חולקים את אותה חנות Shopify** (VERIFIED). ‏staging אינו מבודד.
+
+### E.3 Shopify writes מהקוד (VERIFIED)
+- הקוד **לא מכיל אף mutation של Shopify**: לא מוצרים, לא סטטוס, לא מלאי ולא פרסום. הוא מבצע רק קריאות GraphQL.
+- **⚠️ `POST /api/recovery/mint-token`** מנפיק access token של Shopify Admin (client_credentials), ו**מחזיר אותו בתגובה** לכל מי שמחזיק את `ADMIN_TOKEN`. זה מאפשר לכל סקריפט חיצוני לקבל הרשאות מלאות של האפליקציה.
+
+### E.4 אירוע 2026-10-01 — מה הפעיל אותו
+| זמן UTC | אירוע | מקור |
+|---|---|---|
+| 07:29:36 | upload של ה-Worker של production, wrangler, ‏sportkaraspro@gmail.com | Cloudflare deployments (VERIFIED) |
+| 07:29:39 | נוצר cron `*/5` | Cloudflare schedules (VERIFIED) |
+| 07:29:41–07:31:07 | 4 עדכוני secrets (בהם SHOPIFY_CLIENT_ID/SECRET) | versions (VERIFIED) |
+| 07:35–07:43 | 4,771 מוצרים ACTIVE→DRAFT ע"י "SportPro Manager", כ-600 לדקה | Shopify events (VERIFIED) |
+| 10:16–10:22 | 12 מוצרים נוספים, אחד-אחד | Shopify events (VERIFIED) |
+| 18:48–18:49 | deploy חדש לשני ה-Workers | Cloudflare (VERIFIED) |
+
+מסקנות:
+- **לא ה-Worker** (VERIFIED). אין `scheduled` handler, אין mutation בקוד, ואין רישום ב-D1 (הפעילות האחרונה ב-D1 היא 2026-09-30).
+- **INFERRED (חזק):** סקריפט חיצוני שרץ אצל מי שהיה מחובר ל-wrangler כ-sportkaraspro@gmail.com. סשן ידני או סוכן AI הגדיר את ה-credentials של האפליקציה ב-07:29, וכ-5 דקות אחר כך הריץ לולאת עדכונים. הטוקן הושג דרך client_credentials, ישירות או דרך `mint-token`.
+- **UNKNOWN:** אם זה אדם או סוכן. ב-audit_log מופיעים actors כמו `kaelo-recovery-v2/v3` ב-29–30/9, אבל אין רישום מ-1/10.
+- **האם יכול לקרות שוב:** כן, כל עוד ה-client secret תקף ו-`mint-token` קיים.
+
+### E.5 D1 (VERIFIED, ספירות שורות 11:15)
+- **production `sportpro-orders`:** טבלה אחת בלבד, `shopify_orders` (0 שורות). הקוד דורש 27 טבלאות. **ה-Worker של production לא מתפקד** מעבר ל-`/health` ולדפים הסטטיים.
+- **staging `sportpro-orders-staging` (19.7MB):**
+
+| טבלה | שורות | | טבלה | שורות |
+|---|---:|---|---|---:|
+| variant_state | **20,041** | | product_mappings | **715** |
+| supplier_variants | 19,572 | | mapping_shipping_eval | 715 |
+| discovery_candidates | **8,435** | | products | 289 |
+| supplier_products | 6,812 | | audit_log | 78 |
+| alerts | 51 | | system_settings | 12 |
+| suppliers | 10 | | events | 8 |
+| shipping_policies | 7 | | supplier_shipping | 1 |
+| orders, order_items, supplier_orders, approvals, supplier_purchases, tracking, price_history, stock_history, profit_snapshots, admin_users, automation_log, d1_migrations | 0 | | | |
+
+- **product_mappings 715:** ‏529 REVIEW_REQUIRED + 186 CANDIDATE. **0 MANUAL_VERIFIED. אף אחד לא אושר או נבדק חי** (`live_status` null בכל השורות). רק ספקים 1 (arosport, 25) ו-7 (megasport, 690). ‏107 וריאנטים של ספק ממופים ליותר מוריאנט Shopify אחד (528 שורות).
+- **discovery_candidates 8,435:** כולם `NEW`. אף אחד לא אושר אוטומטית.
+- **variant_state 20,041:** ‏`proposed_sku` קיים ב-**4,707** שורות. **ההצעות קיימות אבל מעולם לא נכתבו ל-Shopify.** ‏6,033 שורות עם SKU (Shopify היום: 6,043).
+- **suppliers:** ‏ACTIVE רק arosport ו-megasport. השאר INACTIVE או REVIEW_REQUIRED (dmksports). ‏Footlocker לא קיים בטבלה.
+- **הזמנות:** 0. ‏audit_log מראה בדיקות E2E וסימולציות ב-24–27/9, כולל 5 `MARK_PURCHASED` של בדיקה, שנוקו אחר כך.
+
+### E.6 Kill Switch — ⚠️ לא אפקטיבי (VERIFIED, קוד + נתונים)
+- staging: `system_settings.kill_switch = 'ON'` (מחרוזת, 2026-09-27 09:13:33).
+- הקוד קורא `JSON.parse(value).active`:
+  - `killSwitchActive()`: ‏`JSON.parse('ON')` זורק שגיאה, ולכן מוחזר **false** (fail-open).
+  - `ingestOrder()`: ‏`'ON'.active` הוא undefined, ולכן **לא נחסם**.
+- **מה בכל זאת מגן היום:** רכש דורש mapping במצב `MANUAL_VERIFIED` (יש 0) וספק ACTIVE, ושני אישורים ידניים. ב-production אין טבלאות, ולכן webhook שם ייכשל עוד לפני הרכש.
+- production: אין `system_settings` בכלל, ולכן אין ערך Kill Switch.
+
+### E.7 אבטחה נוספת בקוד (VERIFIED)
+- `/api/verify/discovery/approve`: השרת מקבל low confidence כש-`b.acknowledge_low_conf` נשלח (`if (conf < 0.9 && !b.acknowledge_low_conf)`), וה-UI תמיד שולח אותו.
+- ה-auth הוא השוואת מחרוזת ל-`ADMIN_TOKEN` יחיד. אין זהות משתמש, ‏`approved_by` מגיע מהלקוח.
+- HMAC של webhooks נבדק (`verifyWebhookSignature`) ויש dedup לפי `X-Shopify-Webhook-Id`.
+- תצורת המשלוח הישנה ב-D1 ל-MegaSport קובעת קטגוריה לפי "shopify title+tags". זה אותו באג שתוקן ב-`shipping.js`.
+- כללי התמחור הישנים ב-D1: markup tiers ‏0–100:15% · ‏100–250:13% · ‏250–500:12% · ‏500+:10%, ‏rounding "charm_up" (…9, עד 5 ₪), ‏max_markup 35, ‏min profit 10, ‏min margin 4, ‏market deviation 25%. **נמצא, ממתין לאישור הבעלים לפני שימוש.**
+
+### E.8 גיבויים שבוצעו (לא ב-git, ה-repository ציבורי)
+- D1 staging + production: כל הטבלאות, `SELECT` עם עימוד לפי rowid, ‏37MB, ‏`_manifest.json` עם sha256 לכל טבלה. הספירות תואמות את E.5.
+- קוד ה-Workers: `index.js` מ-production ומ-staging, ורשימת 15 הגרסאות.
+- המיקום: scratchpad של הסשן (זמני). **חובה להעביר לאחסון פרטי** אחרי שה-repository יהיה פרטי.
