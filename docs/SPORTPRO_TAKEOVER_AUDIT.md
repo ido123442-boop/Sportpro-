@@ -246,7 +246,7 @@
 
 מסקנות:
 - **לא ה-Worker** (VERIFIED). אין `scheduled` handler, אין mutation בקוד, ואין רישום ב-D1 (הפעילות האחרונה ב-D1 היא 2026-09-30).
-- **INFERRED (חזק):** סקריפט חיצוני שרץ אצל מי שהיה מחובר ל-wrangler כ-sportkaraspro@gmail.com. סשן ידני או סוכן AI הגדיר את ה-credentials של האפליקציה ב-07:29, וכ-5 דקות אחר כך הריץ לולאת עדכונים. הטוקן הושג דרך client_credentials, ישירות או דרך `mint-token`.
+- **INFERRED (חזק):** סקריפט חיצוני שרץ אצל מי שהיה מחובר ל-wrangler כ-sportkaraspro@gmail.com. סשן ידני או סוכן AI הגדיר את ה-credentials של האפליקציה ב-07:29, וכ-5 דקות אחר כך הריץ לולאת עדכונים. הטוקן הושג דרך client_credentials ישירות. **תיקון (Phase 1A):** ‏`mint-token` נוסף רק ב-18:48 באותו יום, אחרי האירוע.
 - **UNKNOWN:** אם זה אדם או סוכן. ב-audit_log מופיעים actors כמו `kaelo-recovery-v2/v3` ב-29–30/9, אבל אין רישום מ-1/10.
 - **האם יכול לקרות שוב:** כן, כל עוד ה-client secret תקף ו-`mint-token` קיים.
 
