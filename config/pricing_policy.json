@@ -1,0 +1,16 @@
+{
+  "version": "B-2026-10-04",
+  "payment_fee_pct": 4.5,
+  "payment_fee_fixed_ils": 1,
+  "min_net_profit_ils": 10,
+  "min_net_margin_pct": 4,
+  "max_markup_pct": 35,
+  "charm_suffix": ".90",
+  "markup_tiers": {
+    "status": "UNKNOWN",
+    "named_tiers_pct": [15, 13, 12, 10],
+    "cost_band_boundaries_ils": null,
+    "note": "Policy B names these tiers, but the supplier-cost bands they apply to were never documented. Not applied until the owner sets cost_band_boundaries_ils."
+  },
+  "market_ceiling": { "status": "UNKNOWN", "source": null, "note": "Never invented; only applied when a reliable market price source exists." }
+}

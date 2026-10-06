@@ -146,3 +146,16 @@ test('MegaSport free shipping uses supplier DIVISION, never the Shopify product 
   assert.equal(shippingFor('megasport', { unitCost: 350, productType: '', division: 'footwear' }).cost, 0);
   assert.equal(shippingFor('megasport', { unitCost: 350, productType: '', division: 'Accessories and underwear' }).status, 'UNKNOWN');
 });
+
+import fs from 'node:fs';
+test('pricing policy config and code agree; markup tiers stay UNKNOWN until bands exist', () => {
+  const cfg = JSON.parse(fs.readFileSync(new URL('../config/pricing_policy.json', import.meta.url), 'utf8'));
+  assert.equal(cfg.version, CURRENT_POLICY.version);
+  assert.equal(cfg.payment_fee_pct / 100, CURRENT_POLICY.feePct);
+  assert.equal(cfg.payment_fee_fixed_ils, CURRENT_POLICY.feeFixed);
+  assert.equal(cfg.min_net_profit_ils, CURRENT_POLICY.minProfit);
+  assert.equal(cfg.min_net_margin_pct, CURRENT_POLICY.minMarginPct);
+  assert.equal(cfg.max_markup_pct, CURRENT_POLICY.maxMarkupPct);
+  assert.equal(cfg.markup_tiers.cost_band_boundaries_ils, null);
+  assert.equal(CURRENT_POLICY.markupTiers, null);
+});
