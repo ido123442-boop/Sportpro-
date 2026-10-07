@@ -72,6 +72,7 @@ test('charm pricing and minimum profitable price', () => {
   const m = minProfitablePrice({ supplierCost: 300, shippingCost: 0 });
   assert.ok(evaluateProfit({ sellingPrice: m.price, supplierCost: 300, shippingCost: 0 }).pass);
   assert.ok(!evaluateProfit({ sellingPrice: m.price - 1, supplierCost: 300, shippingCost: 0 }).pass);
+  assert.ok(m.price <= m.cap);
   assert.equal(m.feasible, true);
   // 79.90 + 29 shipping cannot be priced within 35% markup cap
   assert.equal(minProfitablePrice({ supplierCost: 79.9, shippingCost: 29 }).feasible, false);
@@ -158,4 +159,10 @@ test('pricing policy config and code agree; markup tiers stay UNKNOWN until band
   assert.equal(cfg.max_markup_pct, CURRENT_POLICY.maxMarkupPct);
   assert.equal(cfg.markup_tiers.cost_band_boundaries_ils, null);
   assert.equal(CURRENT_POLICY.markupTiers, null);
+});
+
+test('markup above policy ceiling (35%) is blocked with a reprice-down target', () => {
+  const r = evaluateProfit({ sellingPrice: 637.89, supplierCost: 405.93, shippingCost: 0 });
+  assert.equal(r.pass, false); assert.equal(r.reason, 'MARKUP_ABOVE_MAX'); assert.equal(r.maxPrice, 548.01);
+  assert.equal(evaluateProfit({ sellingPrice: 540, supplierCost: 405.93, shippingCost: 0 }).pass, true);
 });

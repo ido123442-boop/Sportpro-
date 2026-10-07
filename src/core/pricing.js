@@ -31,7 +31,9 @@ export function evaluateProfit({ sellingPrice, supplierCost, shippingCost }, pol
   const out = { landed: r2(landed), fees: r2(fees), net: r2(net), marginPct: r2(marginPct), markupPct: r2(markupPct), policy: policy.version };
   if (net < policy.minProfit) return { pass: false, reason: 'PROFIT_BELOW_MIN', ...out };
   if (marginPct < policy.minMarginPct) return { pass: false, reason: 'MARGIN_BELOW_MIN', ...out };
-  return { pass: true, reason: null, ...out, markupAboveMax: markupPct > policy.maxMarkupPct };
+  // Policy ceiling (legacy engine: PRICE_REVIEW). Fix = reprice DOWN to <= cost * (1 + maxMarkup).
+  if (markupPct > policy.maxMarkupPct) return { pass: false, reason: 'MARKUP_ABOVE_MAX', ...out, maxPrice: r2(supplierCost * (1 + policy.maxMarkupPct / 100)) };
+  return { pass: true, reason: null, ...out };
 }
 
 // Smallest price of the form N.90 that is >= p (e.g. 101.2 -> 101.90, 101.95 -> 102.90)
@@ -51,7 +53,10 @@ export function minProfitablePrice({ supplierCost, shippingCost }, policy = CURR
   const byMargin = (landed + policy.feeFixed) / (keep - policy.minMarginPct / 100);
   let price = charmUp(Math.max(byProfit, byMargin));
   // guard against float edge cases
-  while (!evaluateProfit({ sellingPrice: price, supplierCost, shippingCost }, policy).pass) price = r2(price + 1);
+  // floors only (profit + margin); the markup ceiling is checked separately below
+  const floorsPass = (p) => evaluateProfit({ sellingPrice: p, supplierCost, shippingCost }, { ...policy, maxMarkupPct: Infinity }).pass;
+  for (let i = 0; i < 1000 && !floorsPass(price); i++) price = r2(price + 1);
+  if (!floorsPass(price)) return { price: null, feasible: false, reason: 'NO_PRICE_FOUND' };
   const cap = supplierCost * (1 + policy.maxMarkupPct / 100);
   if (price > cap) return { price, feasible: false, reason: 'EXCEEDS_MAX_MARKUP', cap: r2(cap) };
   return { price, feasible: true, reason: null, cap: r2(cap) };
