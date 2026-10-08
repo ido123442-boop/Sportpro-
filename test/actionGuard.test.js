@@ -1,30 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { authorizeAction, parseKillSwitch, ACTIONS } from '../src/core/actionGuard.js';
+import { sellableInput, stagingTarget, PROD_CLIENT_FP } from './helpers/fixtures.js';
 
-const NOW = '2026-10-07T10:00:00Z';
-const sellable = () => ({
-  now: NOW,
-  shopify: { productStatus: 'ACTIVE', price: 400, mediaCount: 3, duplicateSku: false },
-  supplier: { key: 'footlocker', supported: true, feedOk: true, checkoutVerified: true },
-  match: { status: 'MATCHED', cls: 'AUTO_CANDIDATE' },
-  live: { fetchedAt: '2026-10-07T09:30:00Z', stock: 'AVAILABLE', cost: 300, currency: 'ILS', verified: true, variantExists: true, urlOk: true },
-  shipping: { status: 'VERIFIED', cost: 0, conditionSatisfied: true },
-  profit: { pass: true },
-  risk: {},
-  approval: { mappingApproved: true },
-});
 const base = (over = {}) => ({
   settings: { kill_switch: '{"active":false}' },
   action: 'PURCHASE',
-  sellableCtx: sellable(),
+  target: stagingTarget(),
+  sellableInput: sellableInput(),
   approvals: { stage1: true, stage2: true },
   evidence: { supplierOrderNumber: 'N1', transactionConfirmation: 'T1' },
   shopifyWritesEnabled: true,
   ...over,
 });
 
-test('baseline: everything satisfied -> allowed', () => {
+test('baseline: everything satisfied on isolated staging -> allowed', () => {
   for (const a of ACTIONS) assert.equal(authorizeAction(base({ action: a })).allowed, true, a);
 });
 
@@ -38,45 +28,38 @@ test('Kill Switch malformed -> BLOCK', () => {
     for (const a of ACTIONS) assert.match(authorizeAction(base({ action: a, settings: { kill_switch: ks } })).reason, /^KILL_SWITCH_INVALID/);
 });
 
-test('missing settings / missing kill switch value -> BLOCK', () => {
+test('missing settings / missing kill switch value / null ctx -> BLOCK', () => {
   assert.equal(authorizeAction(base({ settings: undefined })).reason, 'SETTINGS_MISSING');
   assert.equal(authorizeAction(base({ settings: {} })).reason, 'KILL_SWITCH_INVALID');
   assert.equal(authorizeAction(null).allowed, false);
 });
 
-test('Kill Switch OFF -> still no Shopify mutation unless SELLABLE and writes enabled', () => {
-  const notSellable = sellable(); notSellable.live.stock = 'UNKNOWN';
-  assert.match(authorizeAction(base({ action: 'SHOPIFY_MUTATION', sellableCtx: notSellable })).reason, /^NOT_SELLABLE/);
-  assert.equal(authorizeAction(base({ action: 'SHOPIFY_MUTATION', shopifyWritesEnabled: false })).reason, 'SHOPIFY_WRITES_DISABLED');
-  assert.equal(authorizeAction(base({ action: 'PUBLISH_LISTING', sellableCtx: undefined })).reason, 'SELLABLE_CONTEXT_MISSING');
+test('target: missing or production-linked -> BLOCK for every action', () => {
+  for (const a of ACTIONS) {
+    assert.equal(authorizeAction(base({ action: a, target: undefined })).reason, 'TARGET_MISSING');
+    assert.equal(authorizeAction(base({ action: a, target: stagingTarget({ shopDomain: 'xayj9j-q9.myshopify.com' }) })).reason, 'TARGET_BLOCKED:STAGING_TARGETS_PRODUCTION_SHOP');
+    assert.equal(authorizeAction(base({ action: a, target: stagingTarget({ shopDomain: 'www.sportpro.shop' }) })).reason, 'TARGET_BLOCKED:STAGING_TARGETS_PRODUCTION_SHOP');
+    assert.equal(authorizeAction(base({ action: a, target: stagingTarget({ shopId: 'gid://shopify/Shop/99554459955' }) })).reason, 'TARGET_BLOCKED:STAGING_TARGETS_PRODUCTION_SHOP');
+    assert.equal(authorizeAction(base({ action: a, target: stagingTarget({ clientIdSha256: PROD_CLIENT_FP }) })).reason, 'TARGET_BLOCKED:STAGING_USES_PRODUCTION_CREDENTIALS');
+    assert.equal(authorizeAction(base({ action: a, target: { environment: 'production', shopDomain: 'xayj9j-q9.myshopify.com' } })).reason, 'TARGET_BLOCKED:PRODUCTION_WRITES_NOT_APPROVED');
+  }
 });
 
-const notSellableCases = [
-  ['missing supplier verification (checkout not verified)', (c) => { c.supplier.checkoutVerified = false; }, /AUTO_READY:CHECKOUT_UNVERIFIED/],
-  ['supplier not onboarded', (c) => { c.supplier.supported = false; }, /SUPPLIER_REQUIRED/],
-  ['missing live verification', (c) => { c.live.verified = false; }, /STALE:LIVE_CHECK_REQUIRED/],
-  ['missing live stock', (c) => { c.live.stock = undefined; }, /STOCK_BLOCKED:STOCK_UNKNOWN/],
-  ['supplier stock unavailable', (c) => { c.live.stock = 'UNAVAILABLE'; }, /STOCK_BLOCKED:STOCK_UNAVAILABLE/],
-  ['missing live price', (c) => { c.profit = { pass: false, reason: 'SUPPLIER_COST_UNKNOWN' }; c.live.cost = null; }, /PROFIT_BLOCKED:SUPPLIER_COST_UNKNOWN/],
-  ['stale live data', (c) => { c.live.fetchedAt = '2026-10-05T00:00:00Z'; }, /STALE:SUPPLIER_DATA_STALE/],
-  ['unknown shipping', (c) => { c.shipping = { status: 'UNKNOWN', cost: null }; }, /SHIPPING_BLOCKED/],
-  ['insufficient profit', (c) => { c.profit = { pass: false, reason: 'PROFIT_BELOW_MIN' }; }, /PROFIT_BLOCKED:PROFIT_BELOW_MIN/],
-  ['insufficient margin', (c) => { c.profit = { pass: false, reason: 'MARGIN_BELOW_MIN' }; }, /PROFIT_BLOCKED:MARGIN_BELOW_MIN/],
-  ['unapproved mapping (HIGH_CONFIDENCE)', (c) => { c.match.cls = 'HIGH_CONFIDENCE'; c.approval.mappingApproved = false; }, /OWNER_APPROVAL/],
-  ['unapproved mapping (AUTO_CANDIDATE not recorded)', (c) => { c.approval.mappingApproved = false; }, /AUTO_READY:AWAITING_MAPPING_RECORD/],
-  ['manual-review mapping', (c) => { c.match.cls = 'MANUAL_REVIEW'; }, /MAPPING_REQUIRED/],
-  ['variant mismatch / gone', (c) => { c.live.variantExists = false; }, /SUPPLIER_VARIANT_GONE/],
-  ['duplicate mapping risk', (c) => { c.risk.duplicateSupplierMapping = true; }, /RISK_BLOCKED/],
-];
-for (const [name, mut, re] of notSellableCases) {
-  test(`Kill Switch OFF but ${name} -> BLOCK for every action`, () => {
-    for (const a of ACTIONS) {
-      const c = sellable(); mut(c);
-      const r = authorizeAction(base({ action: a, sellableCtx: c }));
-      assert.equal(r.allowed, false); assert.match(r.reason, re);
-    }
-  });
-}
+test('Shopify mutation needs SELLABLE and writes enabled', () => {
+  assert.match(authorizeAction(base({ action: 'SHOPIFY_MUTATION', sellableInput: sellableInput({ live: { ...sellableInput().live, stock: 'UNKNOWN' } }) })).reason, /^NOT_SELLABLE:.*STOCK_UNKNOWN/);
+  assert.equal(authorizeAction(base({ action: 'SHOPIFY_MUTATION', shopifyWritesEnabled: false })).reason, 'SHOPIFY_WRITES_DISABLED');
+  assert.equal(authorizeAction(base({ action: 'PUBLISH_LISTING', sellableInput: undefined })).reason, 'SELLABLE_CONTEXT_MISSING');
+});
+
+test('a forged "sellable: true" in the input cannot authorize anything', () => {
+  const forged = { ...sellableInput({ supplier: { code: 'footlocker', verified: false } }), sellable: true, override: true, reasons: [] };
+  for (const a of ACTIONS) assert.match(authorizeAction(base({ action: a, sellableInput: forged })).reason, /SUPPLIER_UNKNOWN/);
+});
+
+test('a kill switch value smuggled inside sellableInput is ignored (settings win)', () => {
+  const r = authorizeAction(base({ settings: { kill_switch: 'ON' }, sellableInput: { ...sellableInput(), killSwitch: '{"active":false}' } }));
+  assert.equal(r.reason, 'KILL_SWITCH_ON');
+});
 
 test('purchase without two approvals -> BLOCK; approval 2 / checkout without approval 1 -> BLOCK', () => {
   assert.equal(authorizeAction(base({ approvals: { stage1: true } })).reason, 'TWO_APPROVALS_REQUIRED');

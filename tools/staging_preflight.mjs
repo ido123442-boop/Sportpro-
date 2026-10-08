@@ -26,6 +26,8 @@ export function preflight(toml) {
   if (PRODUCTION.d1Ids.includes(d1)) fails.push('D1_IS_PRODUCTION');
   if (PRODUCTION.legacyStagingD1Ids.includes(d1)) fails.push('D1_IS_LEGACY_STAGING_WITH_PRODUCTION_DATA');
   if (writes !== 'false') fails.push('SHOPIFY_WRITES_MUST_DEFAULT_FALSE');
+  const fps = (val(toml, 'PRODUCTION_CLIENT_ID_SHA256') ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+  if (!fps.length || fps.some((x) => !/^[a-f0-9]{64}$/.test(x))) fails.push('PRODUCTION_FINGERPRINT_NOT_SET');
   const crons = toml.match(/^\s*crons\s*=\s*\[([^\]]*)\]/m);
   if (crons && crons[1].trim()) fails.push('CRON_PRESENT');
   if (/\b(shpat|shpss|shpca|cfut)_[A-Za-z0-9]/.test(toml)) fails.push('SECRET_IN_CONFIG');

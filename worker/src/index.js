@@ -1473,6 +1473,12 @@ __name(readKillSwitch, "readKillSwitch");
 async function killSwitchBlock(db, action) {
   const ks = await readKillSwitch(db);
   if (ks.state === "OFF") return null;
+  try {
+    await db.prepare(
+      `INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('guard', 'GUARD_BLOCKED', ?, NULL, ?)`
+    ).bind(action, JSON.stringify({ error: "kill_switch_blocked", kill_switch: ks.state, reason: ks.reason })).run();
+  } catch {
+  }
   return Response.json(
     { error: "kill_switch_blocked", action, kill_switch: ks.state, reason: ks.reason },
     { status: 423 }
@@ -1487,6 +1493,32 @@ __name(killSwitchBlock, "killSwitchBlock");
 // SPORTPRO_ENV === "staging" on a store that is NOT the production store.
 const GUARDED_ACTIONS = ["approval_1", "approval_2", "checkout_draft", "purchase", "shopify_mutation"];
 const PRODUCTION_SHOP_DOMAINS = ["xayj9j-q9.myshopify.com", "sportpro.shop", "www.sportpro.shop"];
+// Production protection (mirror of src/core/targetGuard.js). SHOP + ENVIRONMENT + CREDENTIALS must match.
+// Only STAGING + non-production *.myshopify.com + client id provably not production is allowed.
+// PRODUCTION is always blocked here: no production write policy exists in this code.
+async function sha256Hex(s) {
+  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(s)));
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+__name(sha256Hex, "sha256Hex");
+async function assertNonProductionTarget(env2) {
+  const deny = (error, reason) => ({ allowed: false, error, reason });
+  if (!env2) return deny("environment_not_staging", "ENVIRONMENT_UNKNOWN");
+  const envName = String(env2.SPORTPRO_ENV || "");
+  const shop = String(env2.SHOPIFY_SHOP_DOMAIN || "").trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+  const prodShop = PRODUCTION_SHOP_DOMAINS.includes(shop);
+  if (!shop) return deny(envName === "staging" ? "staging_not_isolated" : "environment_not_staging", "SHOP_UNKNOWN");
+  if (envName === "production") return deny("environment_not_staging", prodShop ? "PRODUCTION_WRITES_NOT_APPROVED" : "PRODUCTION_ENV_TARGETS_NON_PRODUCTION_SHOP");
+  if (envName !== "staging") return deny("environment_not_staging", "ENVIRONMENT_UNKNOWN");
+  if (prodShop) return deny("staging_not_isolated", "STAGING_TARGETS_PRODUCTION_SHOP");
+  if (!shop.endsWith(".myshopify.com")) return deny("staging_not_isolated", "SHOP_DOMAIN_NOT_MYSHOPIFY");
+  const fps = String(env2.PRODUCTION_CLIENT_ID_SHA256 || "").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
+  if (!fps.length) return deny("staging_not_isolated", "PRODUCTION_FINGERPRINTS_UNSET");
+  if (!env2.SHOPIFY_CLIENT_ID) return deny("staging_not_isolated", "CLIENT_ID_UNKNOWN");
+  if (fps.includes(await sha256Hex(env2.SHOPIFY_CLIENT_ID))) return deny("staging_not_isolated", "STAGING_USES_PRODUCTION_CREDENTIALS");
+  return { allowed: true, error: null, reason: null };
+}
+__name(assertNonProductionTarget, "assertNonProductionTarget");
 async function guardAction(db, env2, action, ctx = {}) {
   const g = await guardDecision(db, env2, action, ctx);
   if (!g.ok) {
@@ -1504,9 +1536,8 @@ async function guardDecision(db, env2, action, ctx) {
   if (!GUARDED_ACTIONS.includes(action)) return { ok: false, error: "unknown_action", action };
   const ks = await readKillSwitch(db);
   if (ks.state !== "OFF") return { ok: false, status: 423, error: "kill_switch_blocked", action, kill_switch: ks.state, reason: ks.reason };
-  if (!env2 || env2.SPORTPRO_ENV !== "staging") return { ok: false, status: 423, error: "environment_not_staging", action, reason: "writes_and_order_flow_allowed_in_staging_only" };
-  const shop = String(env2.SHOPIFY_SHOP_DOMAIN || "").trim().toLowerCase();
-  if (!shop || PRODUCTION_SHOP_DOMAINS.includes(shop)) return { ok: false, status: 423, error: "staging_not_isolated", action, reason: "shop_domain_is_production_or_missing" };
+  const tgt = await assertNonProductionTarget(env2);
+  if (!tgt.allowed) return { ok: false, status: 423, error: tgt.error, action, reason: tgt.reason };
   if (action === "shopify_mutation") {
     if (env2.SHOPIFY_WRITES_ENABLED !== "true") return { ok: false, error: "writes_disabled", action };
     return { ok: true };
@@ -1729,7 +1760,8 @@ async function getAdminToken(env2) {
 }
 __name(getAdminToken, "getAdminToken");
 async function shopifyGraphQL(env2, query, variables = {}) {
-  if (/^\s*mutation\b/i.test(String(query))) {
+  // Any occurrence of the word "mutation" (incl. after comments / operation names) is treated as a write.
+  if (/\bmutation\b/i.test(String(query))) {
     const g = await guardAction(env2.DB, env2, "shopify_mutation");
     if (!g.ok) throw new Error(`shopify_mutation_blocked:${g.error === "kill_switch_blocked" ? "kill_switch_" + g.kill_switch : g.error}`);
   }
@@ -3356,6 +3388,12 @@ async function handleOrdersApi(request, env2, url) {
   try {
     settings = await getSettings(db);
   } catch (e) {
+    try {
+      await db.prepare(
+        `INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('guard', 'GUARD_BLOCKED', 'orders_api', ?, ?)`
+      ).bind(path, JSON.stringify({ error: "settings_unavailable_fail_closed" })).run();
+    } catch {
+    }
     return Response.json({ error: "settings_unavailable_fail_closed", kill_switch: "INVALID" }, { status: 423 });
   }
   if (path === "/api/procurement/queue" && request.method === "GET") {
@@ -3550,6 +3588,18 @@ async function handleOrdersApi(request, env2, url) {
     ).bind(id).run();
     await audit2(db, "owner", "SUPPLIER_ORDER_CANCELLED", "supplier_order", id, {});
     return Response.json({ ok: true });
+  }
+  if (path.startsWith("/api/test/") && request.method !== "GET") {
+    const tgtTest = await assertNonProductionTarget(env2);
+    if (!tgtTest.allowed) {
+      try {
+        await db.prepare(
+          `INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('guard', 'GUARD_BLOCKED', 'test_route', ?, ?)`
+        ).bind(path, JSON.stringify({ error: tgtTest.error, reason: tgtTest.reason })).run();
+      } catch {
+      }
+      return Response.json({ error: tgtTest.error, reason: tgtTest.reason }, { status: 423 });
+    }
   }
   if (path === "/api/test/create-order" && request.method === "POST") {
     const body = await request.json().catch(() => ({}));
@@ -5108,6 +5158,9 @@ var index_default = {
     if (url.pathname.startsWith("/api/")) {
       const auth = checkAuth(request, env2);
       if (!auth.ok) return Response.json({ error: auth.reason }, { status: 401 });
+      if (!env2.DB || typeof env2.DB.prepare !== "function") {
+        return Response.json({ error: "d1_unavailable_fail_closed" }, { status: 503 });
+      }
       if (url.pathname === "/api/verify-shopify") {
         return handleApi(request, env2, url);
       }
@@ -5371,6 +5424,7 @@ export {
   index_default as default,
   parseKillSwitch as __parseKillSwitch,
   shopifyGraphQL as __shopifyGraphQL,
-  guardAction as __guardAction
+  guardAction as __guardAction,
+  assertNonProductionTarget as __assertNonProductionTarget
 };
 //# sourceMappingURL=index.js.map

@@ -16,6 +16,10 @@ crons = []
 SPORTPRO_ENV = "staging"
 SHOPIFY_SHOP_DOMAIN = "<DEV_STORE_HANDLE>.myshopify.com"
 SHOPIFY_WRITES_ENABLED = "false"   # set to "true" only for the staging E2E product-creation step
+# sha256 (hex) of the PRODUCTION Shopify client id(s), comma-separated. Not a secret (a one-way hash).
+# Compute locally:  printf %s "<production client id>" | sha256sum
+# Required: without it the Worker cannot prove staging credentials are not production -> every write blocked.
+PRODUCTION_CLIENT_ID_SHA256 = "<SHA256_OF_PRODUCTION_CLIENT_ID>"
 
 [[d1_databases]]
 binding = "DB"

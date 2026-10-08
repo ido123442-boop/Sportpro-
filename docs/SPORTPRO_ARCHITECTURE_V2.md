@@ -1,3 +1,5 @@
+> **Superseded (2026-10-08):** for the code as built see `SPORTPRO_ARCHITECTURE.md`.
+
 # SPORTPRO — Architecture V2 (Sellable-First)
 
 Status: **design + tested pure core; nothing deployed.** Code: `src/core/*` (98 tests), schema `migrations/0001_supplier_first.sql` (not applied), tools in `tools/`.
