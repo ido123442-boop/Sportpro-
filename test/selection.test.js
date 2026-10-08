@@ -8,7 +8,7 @@ test('tiers: legacy D1 bands by supplier cost', () => {
   assert.equal(tierFor(499.99).pct, 12);
   assert.equal(tierFor(500).pct, 10);
   assert.equal(tierFor(0), null);
-  assert.equal(LEGACY_D1_TIERS.status, 'PENDING_OWNER_CONFIRMATION');
+  assert.equal(LEGACY_D1_TIERS.status, 'PENDING_APPROVAL');
 });
 
 test('price policy: proposal is never final while tiers are pending', () => {

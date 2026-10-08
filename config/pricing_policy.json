@@ -7,7 +7,7 @@
   "max_markup_pct": 35,
   "charm_suffix": ".90",
   "markup_tiers": {
-    "status": "UNKNOWN",
+    "status": "PENDING_APPROVAL",
     "named_tiers_pct": [
       15,
       13,
@@ -15,7 +15,7 @@
       10
     ],
     "cost_band_boundaries_ils": null,
-    "note": "Policy B names these tiers, but the supplier-cost bands they apply to were never documented. Not applied until the owner sets cost_band_boundaries_ils.",
+    "note": "Proposed by the owner's command (2026-10-08) and found in legacy D1. Used only to compute PROPOSED prices; never FINAL until the owner approves. Boundaries: lower bound inclusive, upper bound exclusive.",
     "found_in_legacy_d1": {
       "source": "staging D1 system_settings.pricing_rules (updated 2026-09-24)",
       "bands": [
@@ -42,11 +42,40 @@
       ],
       "legacy_rounding": "charm_up to ...9, max_round_up 5 ILS",
       "status": "PENDING_OWNER_CONFIRMATION"
-    }
+    },
+    "proposed_bands": [
+      {
+        "min": 0,
+        "max": 100,
+        "markup_target_pct": 15
+      },
+      {
+        "min": 100,
+        "max": 250,
+        "markup_target_pct": 13
+      },
+      {
+        "min": 250,
+        "max": 500,
+        "markup_target_pct": 12
+      },
+      {
+        "min": 500,
+        "max": null,
+        "markup_target_pct": 10
+      }
+    ]
   },
   "market_ceiling": {
     "status": "UNKNOWN",
     "source": null,
     "note": "Never invented; only applied when a reliable market price source exists."
+  },
+  "PRICING_POLICY_STATUS": "PENDING_APPROVAL",
+  "max_markup_pct_enforced": true,
+  "approval": {
+    "approved_by": null,
+    "approved_at": null,
+    "required_command": "APPROVE PRICING POLICY"
   }
 }

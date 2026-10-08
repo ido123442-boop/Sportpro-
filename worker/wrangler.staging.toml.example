@@ -1,0 +1,37 @@
+# STAGING ONLY — template. Copy to wrangler.staging.toml and fill the <...> values.
+# Deploy:  npx wrangler deploy --config worker/wrangler.staging.toml
+# Preflight (must pass first): node tools/staging_preflight.mjs worker/wrangler.staging.toml
+# Secrets are set with `wrangler secret put` and never written here.
+name = "sportpro-automation-staging-iso"
+main = "src/index.js"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+
+# No cron triggers in staging (the production Worker has an orphan */5 cron).
+[triggers]
+crons = []
+
+[vars]
+SPORTPRO_ENV = "staging"
+SHOPIFY_SHOP_DOMAIN = "<DEV_STORE_HANDLE>.myshopify.com"
+SHOPIFY_WRITES_ENABLED = "false"   # set to "true" only for the staging E2E product-creation step
+
+[[d1_databases]]
+binding = "DB"
+database_name = "sportpro-staging-iso"
+database_id = "<NEW_STAGING_D1_ID>"
+
+[[durable_objects.bindings]]
+name = "PROCUREMENT_LOCK"
+class_name = "ProcurementLock"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["ProcurementLock"]
+
+# Required secrets (names only):
+#   ADMIN_TOKEN            new random value, staging only
+#   SHOPIFY_CLIENT_ID      from the STAGING app (dev store), never the production app
+#   SHOPIFY_CLIENT_SECRET  from the STAGING app
+#   WEBHOOK_SECRET         the staging app's webhook signing secret

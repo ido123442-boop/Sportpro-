@@ -6,7 +6,7 @@ import { CURRENT_POLICY, charmUp, evaluateProfit, minProfitablePrice } from './p
 // Markup tiers found in legacy D1 pricing_rules. NOT confirmed by the owner -> any price derived
 // from them is a proposal only (status PENDING_OWNER_CONFIRMATION), never a final price.
 export const LEGACY_D1_TIERS = Object.freeze({
-  status: 'PENDING_OWNER_CONFIRMATION',
+  status: 'PENDING_APPROVAL', // PRICING_POLICY_STATUS in config/pricing_policy.json
   bands: Object.freeze([
     Object.freeze({ from: 0, to: 100, pct: 15 }),
     Object.freeze({ from: 100, to: 250, pct: 13 }),

@@ -12,3 +12,4 @@ dashboard/*.html
 audit/dashboard_data.json
 audit/live_candidates.json
 !worker/schema/*.sql
+!staging/seed/*.sql

@@ -24,7 +24,7 @@ function d1(db) {
   return { prepare: (sql) => stmt(sql), batch: async (list) => Promise.all(list.map((s) => s.run())), _db: db };
 }
 
-function makeEnv({ killSwitch = '{"active":true}', withSettingsTable = true } = {}) {
+function makeEnv({ killSwitch = '{"active":true}', withSettingsTable = true, sportproEnv = 'staging', shop = 'sportpro-staging-dev.myshopify.com' } = {}) {
   const db = new DatabaseSync(':memory:');
   db.exec(SCHEMA);
   if (!withSettingsTable) db.exec('DROP TABLE system_settings');
@@ -33,7 +33,7 @@ function makeEnv({ killSwitch = '{"active":true}', withSettingsTable = true } = 
   const locks = new Map();
   return {
     DB: d1(db), _db: db,
-    ADMIN_TOKEN: ADMIN, WEBHOOK_SECRET, SHOPIFY_SHOP_DOMAIN: 'example.myshopify.com', SHOPIFY_CLIENT_ID: 'x', SHOPIFY_CLIENT_SECRET: 'y',
+    ADMIN_TOKEN: ADMIN, WEBHOOK_SECRET, SPORTPRO_ENV: sportproEnv, SHOPIFY_SHOP_DOMAIN: shop, SHOPIFY_CLIENT_ID: 'x', SHOPIFY_CLIENT_SECRET: 'y',
     PROCUREMENT_LOCK: {
       idFromName: (n) => n,
       get: (id) => ({ fetch: async (u) => { const a = new URL(u).pathname.slice(1); if (a === 'acquire') { if (locks.has(id)) return Response.json({ acquired: false }); locks.set(id, 1); return Response.json({ acquired: true }); } locks.delete(id); return Response.json({ released: true }); } }),
@@ -238,4 +238,172 @@ test('served /verify page no longer sends acknowledge_low_conf', async () => {
 test('unauthenticated API access is refused', async () => {
   const r = await call(makeEnv(), 'GET', '/api/kill-switch', undefined, { auth: false });
   assert.equal(r.status, 401);
+});
+
+// =====================================================================================
+// MASTER COMMAND 2 — the 15 required scenarios (numbered as in the command).
+// Worker = real patched bundle; core = src/core/actionGuard.js (SELLABLE gate).
+// =====================================================================================
+const { authorizeAction } = await import('../src/core/actionGuard.js');
+const { evaluateProfit } = await import('../src/core/pricing.js');
+
+const PURCHASE_BODY = { supplier_order_number: 'N1', transaction_confirmation: 'T1' };
+const ACTION_CALLS = {
+  approval_1: ['PENDING', [], '/api/approvals', { supplier_order_id: 1, stage: 1, decision: 'APPROVED', approved_by: 'owner' }],
+  approval_2: ['APPROVED', [1], '/api/approvals', { supplier_order_id: 1, stage: 2, decision: 'APPROVED', approved_by: 'owner' }],
+  checkout_draft: ['APPROVED', [1], '/api/supplier-orders/1/checkout-draft', {}],
+  purchase: ['PAYMENT_PENDING_SUPPLIER', [1, 2], '/api/supplier-orders/1/purchase', PURCHASE_BODY],
+};
+async function attempt(envOpts, action, isTest = 1) {
+  const env = makeEnv(envOpts);
+  const [soStatus, approvals, path, body] = ACTION_CALLS[action];
+  seedOrder(env, { soStatus, approvals, isTest });
+  const r = await call(env, 'POST', path, body);
+  return { r, env, soStatus, approvals };
+}
+function assertUnchanged({ env, soStatus, approvals }) {
+  assert.equal(env._db.prepare('SELECT status FROM supplier_orders WHERE id = 1').get().status, soStatus);
+  assert.equal(env._db.prepare('SELECT COUNT(*) n FROM approvals').get().n, approvals.length);
+  assert.equal(env._db.prepare('SELECT COUNT(*) n FROM supplier_purchases').get().n, 0);
+}
+
+for (const [n, action] of [[1, 'approval_1'], [2, 'approval_2'], [3, 'checkout_draft'], [4, 'purchase']]) {
+  test(`MC2-${n}: Kill Switch ON + ${action} -> BLOCK (even for a test order in staging)`, async () => {
+    const a = await attempt({ killSwitch: '{"active":true}' }, action, 1);
+    assert.equal(a.r.status, 423); assert.equal(a.r.json.error, 'kill_switch_blocked');
+    assertUnchanged(a);
+  });
+}
+
+test('MC2-5: Kill Switch ON + Shopify mutation -> BLOCK, no network call', async () => {
+  fetchCalls.length = 0;
+  const env = { ...makeEnv({ killSwitch: 'ON' }), SHOPIFY_WRITES_ENABLED: 'true' };
+  await assert.rejects(worker.__shopifyGraphQL(env, 'mutation { productCreate(input:{title:"x"}) { userErrors { message } } }'), /kill_switch_ON/);
+  assert.equal(fetchCalls.length, 0);
+});
+
+const NOW = '2026-10-08T10:00:00Z';
+function sellableCtx(over = {}) {
+  const cost = 319.9, ship = 0, price = 373.89;
+  return {
+    now: NOW,
+    shopify: { productStatus: 'ACTIVE', price, mediaCount: 4, duplicateSku: false },
+    supplier: { key: 'footlocker', supported: true, feedOk: true, checkoutVerified: true },
+    match: { status: 'MATCHED', cls: 'AUTO_CANDIDATE' },
+    live: { fetchedAt: '2026-10-08T09:30:00Z', stock: 'AVAILABLE', cost, currency: 'ILS', verified: true, variantExists: true, urlOk: true },
+    shipping: { status: 'VERIFIED', cost: ship, conditionSatisfied: true },
+    profit: evaluateProfit({ sellingPrice: price, supplierCost: cost, shippingCost: ship }),
+    risk: {}, approval: { mappingApproved: true },
+    ...over,
+  };
+}
+const guard = (action, over = {}, extra = {}) => authorizeAction({
+  settings: { kill_switch: '{"active":false}' }, action, sellableCtx: sellableCtx(over),
+  approvals: { stage1: true, stage2: true }, evidence: { supplierOrderNumber: 'N1', transactionConfirmation: 'T1' }, shopifyWritesEnabled: true, ...extra,
+});
+
+test('MC2-6: Kill Switch OFF + non-sellable -> BLOCK (core gate and Worker real order)', async () => {
+  const d = guard('PURCHASE', { approval: { mappingApproved: false } });
+  assert.equal(d.allowed, false); assert.match(d.reason, /^NOT_SELLABLE:/);
+  for (const action of Object.keys(ACTION_CALLS)) {
+    const a = await attempt({ killSwitch: '{"active":false}' }, action, 0);
+    assert.equal(a.r.status, 423); assert.equal(a.r.json.error, 'sellable_gate_required');
+    assertUnchanged(a);
+  }
+});
+
+test('MC2-7: Kill Switch OFF + sellable + only one approval -> BLOCK', async () => {
+  assert.equal(guard('PURCHASE', {}, { approvals: { stage1: true, stage2: false } }).reason, 'TWO_APPROVALS_REQUIRED');
+  const env = makeEnv({ killSwitch: '{"active":false}' });
+  seedOrder(env, { soStatus: 'PAYMENT_PENDING_SUPPLIER', approvals: [1], isTest: 1 });
+  const r = await call(env, 'POST', '/api/supplier-orders/1/purchase', PURCHASE_BODY);
+  assert.equal(r.status, 409); assert.equal(r.json.error, 'two_approvals_required');
+  assert.equal(env._db.prepare('SELECT COUNT(*) n FROM supplier_purchases').get().n, 0);
+});
+
+test('MC2-8: Kill Switch OFF + sellable + two approvals -> ALLOWED in isolated staging only', async () => {
+  assert.equal(guard('PURCHASE').allowed, true);
+  // staging, non-production store, test order: purchase record is written (simulation; no payment, no network)
+  fetchCalls.length = 0;
+  const ok = await attempt({ killSwitch: '{"active":false}' }, 'purchase', 1);
+  assert.equal(ok.r.status, 200, JSON.stringify(ok.r.json));
+  assert.equal(ok.env._db.prepare('SELECT COUNT(*) n FROM supplier_purchases').get().n, 1);
+  assert.equal(fetchCalls.length, 0);
+  // same request outside staging, or staging pointed at the production store -> BLOCK
+  for (const [opts, err] of [
+    [{ sportproEnv: 'production' }, 'environment_not_staging'],
+    [{ sportproEnv: null }, 'environment_not_staging'],
+    [{ shop: 'xayj9j-q9.myshopify.com' }, 'staging_not_isolated'],
+    [{ shop: '' }, 'staging_not_isolated'],
+  ]) {
+    const a = await attempt({ killSwitch: '{"active":false}', ...opts }, 'purchase', 1);
+    assert.equal(a.r.status, 423); assert.equal(a.r.json.error, err);
+    assertUnchanged(a);
+  }
+});
+
+test('MC2-9: real (non-test) order -> BLOCKED in the test environment, block is audited', async () => {
+  const a = await attempt({ killSwitch: '{"active":false}' }, 'approval_1', 0);
+  assert.equal(a.r.json.error, 'sellable_gate_required');
+  const row = a.env._db.prepare("SELECT * FROM audit_log WHERE action = 'GUARD_BLOCKED'").get();
+  assert.ok(row); assert.equal(row.entity_type, 'approval_1'); assert.match(row.details, /sellable_gate_required/);
+});
+
+test('MC2-10: test order -> full flow allowed in staging (approval #1 -> draft -> approval #2 -> purchase record)', async () => {
+  fetchCalls.length = 0;
+  const env = makeEnv({ killSwitch: '{"active":false}' });
+  env._db.exec("UPDATE suppliers SET base_url = 'https://www.footlocker.co.il', checkout_method = 'cart_permalink' WHERE id = 1");
+  seedOrder(env, { soStatus: 'PENDING', isTest: 1 });
+  env._db.prepare('UPDATE supplier_orders SET items = ?, supplier_total = 319.9, supplier_shipping = 0 WHERE id = 1').run(JSON.stringify([{ title: 'U AUTHENTIC', quantity: 1, supplier_variant_id: '44817809080473', supplier_cost: 319.9 }]));
+  const a1 = await call(env, 'POST', '/api/approvals', { supplier_order_id: 1, stage: 1, decision: 'APPROVED', approved_by: 'owner' });
+  assert.equal(a1.status, 200, JSON.stringify(a1.json));
+  const d = await call(env, 'POST', '/api/supplier-orders/1/checkout-draft', {});
+  assert.equal(d.status, 200, JSON.stringify(d.json));
+  assert.equal(d.json.test_customer_used, true);
+  assert.match(d.json.draft.checkout_url, /^https:\/\/www\.footlocker\.co\.il\/cart\/44817809080473:1/);
+  const a2 = await call(env, 'POST', '/api/approvals', { supplier_order_id: 1, stage: 2, decision: 'APPROVED', approved_by: 'owner' });
+  assert.equal(a2.status, 200, JSON.stringify(a2.json));
+  const p = await call(env, 'POST', '/api/supplier-orders/1/purchase', PURCHASE_BODY);
+  assert.equal(p.status, 200, JSON.stringify(p.json));
+  assert.equal(env._db.prepare('SELECT status FROM supplier_orders WHERE id = 1').get().status, 'PURCHASED');
+  assert.equal(fetchCalls.length, 0, 'no supplier or Shopify call during the simulated flow');
+  const audited = env._db.prepare('SELECT action FROM audit_log ORDER BY id').all().map((r) => r.action);
+  console.log('# MC2-10 audit trail:', audited.join(' > '));
+  assert.ok(audited.includes('CHECKOUT_DRAFT_CREATED'));
+  assert.ok(audited.length >= 3, 'every step leaves an audit row');
+});
+
+test('MC2-11: missing D1 table -> FAIL CLOSED on every money path', async () => {
+  for (const action of Object.keys(ACTION_CALLS)) {
+    const env = makeEnv({ withSettingsTable: false });
+    const [soStatus, approvals, path, body] = ACTION_CALLS[action];
+    seedOrder(env, { soStatus, approvals, isTest: 1 });
+    const r = await call(env, 'POST', path, body);
+    assert.equal(r.status, 423, action); assert.equal(r.json.kill_switch, 'INVALID');
+    assertUnchanged({ env, soStatus, approvals });
+  }
+  const g = await worker.__guardAction(makeEnv({ withSettingsTable: false }).DB, { SPORTPRO_ENV: 'staging', SHOPIFY_SHOP_DOMAIN: 'x.myshopify.com', SHOPIFY_WRITES_ENABLED: 'true' }, 'shopify_mutation');
+  assert.equal(g.ok, false);
+});
+
+test('MC2-12: unknown stock -> BLOCK', () => {
+  for (const a of ['APPROVAL_1', 'PURCHASE', 'SHOPIFY_MUTATION'])
+    assert.equal(guard(a, { live: { ...sellableCtx().live, stock: 'UNKNOWN' } }).reason, 'NOT_SELLABLE:STOCK_BLOCKED:STOCK_UNKNOWN');
+});
+
+test('MC2-13: unknown shipping -> BLOCK', () => {
+  for (const sh of [{ status: 'UNKNOWN', cost: null }, null, { status: 'CONDITIONAL', cost: null }])
+    assert.match(guard('PURCHASE', { shipping: sh }).reason, /^NOT_SELLABLE:SHIPPING_BLOCKED:/);
+});
+
+test('MC2-14: negative profit -> BLOCK', () => {
+  const profit = evaluateProfit({ sellingPrice: 300, supplierCost: 319.9, shippingCost: 0 });
+  assert.ok(profit.net < 0);
+  assert.equal(guard('PURCHASE', { profit }).reason, 'NOT_SELLABLE:PROFIT_BLOCKED:PROFIT_BELOW_MIN');
+});
+
+test('MC2-15: markup above maximum (35%) -> BLOCK', () => {
+  const profit = evaluateProfit({ sellingPrice: 450, supplierCost: 319.9, shippingCost: 0 });
+  assert.equal(profit.reason, 'MARKUP_ABOVE_MAX');
+  assert.equal(guard('PUBLISH_LISTING', { profit }).reason, 'NOT_SELLABLE:PROFIT_BLOCKED:MARKUP_ABOVE_MAX');
 });

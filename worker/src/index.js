@@ -1480,16 +1480,35 @@ async function killSwitchBlock(db, action) {
 }
 __name(killSwitchBlock, "killSwitchBlock");
 // SPORTPRO: single central guard for every money / write action.
-// Order: kill switch -> action preconditions -> SELLABLE gate. Anything not explicitly allowed is blocked.
+// Order: kill switch -> environment isolation -> action preconditions -> SELLABLE gate.
+// Anything not explicitly allowed is blocked, and every block is written to audit_log (best effort).
 // The SELLABLE gate (src/core/eligibility.js + actionGuard.js) is not wired into this legacy schema,
-// so REAL (non-test) orders are blocked until it is. Only is_test orders may move (staging E2E).
+// so REAL (non-test) orders are blocked until it is. Only is_test orders may move, and only when
+// SPORTPRO_ENV === "staging" on a store that is NOT the production store.
 const GUARDED_ACTIONS = ["approval_1", "approval_2", "checkout_draft", "purchase", "shopify_mutation"];
+const PRODUCTION_SHOP_DOMAINS = ["xayj9j-q9.myshopify.com", "sportpro.shop", "www.sportpro.shop"];
 async function guardAction(db, env2, action, ctx = {}) {
+  const g = await guardDecision(db, env2, action, ctx);
+  if (!g.ok) {
+    try {
+      await db.prepare(
+        `INSERT INTO audit_log (actor, action, entity_type, entity_id, details) VALUES ('guard', 'GUARD_BLOCKED', ?, ?, ?)`
+      ).bind(action, ctx.so ? String(ctx.so.id) : null, JSON.stringify({ error: g.error, reason: g.reason || null, kill_switch: g.kill_switch || null })).run();
+    } catch {
+    }
+  }
+  return g;
+}
+__name(guardAction, "guardAction");
+async function guardDecision(db, env2, action, ctx) {
   if (!GUARDED_ACTIONS.includes(action)) return { ok: false, error: "unknown_action", action };
   const ks = await readKillSwitch(db);
   if (ks.state !== "OFF") return { ok: false, status: 423, error: "kill_switch_blocked", action, kill_switch: ks.state, reason: ks.reason };
+  if (!env2 || env2.SPORTPRO_ENV !== "staging") return { ok: false, status: 423, error: "environment_not_staging", action, reason: "writes_and_order_flow_allowed_in_staging_only" };
+  const shop = String(env2.SHOPIFY_SHOP_DOMAIN || "").trim().toLowerCase();
+  if (!shop || PRODUCTION_SHOP_DOMAINS.includes(shop)) return { ok: false, status: 423, error: "staging_not_isolated", action, reason: "shop_domain_is_production_or_missing" };
   if (action === "shopify_mutation") {
-    if (!env2 || env2.SHOPIFY_WRITES_ENABLED !== "true") return { ok: false, error: "writes_disabled", action };
+    if (env2.SHOPIFY_WRITES_ENABLED !== "true") return { ok: false, error: "writes_disabled", action };
     return { ok: true };
   }
   const so = ctx.so;
@@ -1497,7 +1516,7 @@ async function guardAction(db, env2, action, ctx = {}) {
   if (so.is_test !== 1) return { ok: false, status: 423, error: "sellable_gate_required", action, reason: "real_orders_blocked_until_sellable_gate_is_wired" };
   return { ok: true };
 }
-__name(guardAction, "guardAction");
+__name(guardDecision, "guardDecision");
 function guardResponse(g) {
   const { ok, status, ...rest } = g;
   return Response.json(rest, { status: status || 423 });
@@ -3333,7 +3352,12 @@ __name(setOrderStatus, "setOrderStatus");
 async function handleOrdersApi(request, env2, url) {
   const db = env2.DB;
   const path = url.pathname;
-  const settings = await getSettings(db);
+  let settings;
+  try {
+    settings = await getSettings(db);
+  } catch (e) {
+    return Response.json({ error: "settings_unavailable_fail_closed", kill_switch: "INVALID" }, { status: 423 });
+  }
   if (path === "/api/procurement/queue" && request.method === "GET") {
     const rows = await db.prepare(
       `SELECT so.id, so.order_id, so.supplier_id, so.status, so.is_test,

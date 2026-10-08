@@ -1,0 +1,9 @@
+{
+  "environment": "staging_only",
+  "status": "CANDIDATE",
+  "approved": false,
+  "note": "Created in the staging D1 only after the staging Shopify product exists. Approval is a human action on /verify (never automatic).",
+  "shopify": { "store": "<STAGING_DEV_STORE>.myshopify.com", "product_id": null, "variant_id": null, "sku": "VEE3BKA040", "size": "35" },
+  "supplier": { "code": "footlocker", "product_id": "8216717852825", "variant_id": "44817809080473", "sku": "VEE3BKA040", "barcode": "700053288836", "size": "35", "brand": "VANS" },
+  "match": { "method": "SKU_EXACT", "confidence": 1.0, "unique_sku": true, "evidence": "Shopify SKU == supplier SKU; size 35 == option1; single product in pool with this SKU" }
+}

@@ -1,0 +1,37 @@
+{
+  "code": "footlocker",
+  "name": "Foot Locker IL",
+  "legal_note": "Retail website used as a dropshipping source; no supplier agreement on file (UNKNOWN).",
+  "base_url": "https://www.footlocker.co.il",
+  "platform": "shopify",
+  "feed_type": "SHOPIFY_STOREFRONT_JSON",
+  "catalog_source": "GET /products.json (paged)",
+  "price_source": "GET /products/{handle}.js -> variants[].price / 100 (ILS, VAT included)",
+  "stock_source": "GET /products/{handle}.js -> variants[].available (boolean; quantity never used; missing => UNKNOWN)",
+  "shipping_source": {
+    "url": "https://www.footlocker.co.il/policies/shipping-policy",
+    "rule": "free from 199 ILS, otherwise 14.90 ILS",
+    "verified_live": "2026-10-08 cart/shipping_rates.json (Israel): home courier 0.00 ILS, store pickup 0.00 ILS for a 319.90 ILS cart",
+    "status": "VERIFIED"
+  },
+  "checkout_adapter": "shopify_cart_permalink",
+  "checkout_validation": {
+    "status": "PARTIAL",
+    "evidence": "2026-10-08: cart/add 200 -> checkout page rendered: country Israel, variant 35, 319.90 ILS, shipping free, total 319.90 ILS incl. VAT. Stopped before contact/payment input; cart cleared.",
+    "missing": ["real order placement", "order confirmation email/number", "tracking number delivery", "cancellation/return flow"]
+  },
+  "currency": "ILS",
+  "country": "IL",
+  "ships_to": ["IL"],
+  "status": "REVIEW_REQUIRED",
+  "environment": "staging_only",
+  "risk": {
+    "level": "MEDIUM",
+    "factors": [
+      "retail site, not a contracted supplier: prices and promotions can change without notice",
+      "frequent promotions (compare_at) make cost unstable; Selection Agent demotes promo-priced items",
+      "checkout not validated end-to-end (no real order yet)",
+      "customer address must be entered manually at supplier checkout"
+    ]
+  }
+}
