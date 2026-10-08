@@ -52,10 +52,10 @@ async function call(env, method, path, body, { auth = true } = {}) {
   return { status: res.status, json, text: json ? null : await res.text() };
 }
 
-function seedOrder(env, { soStatus = 'PENDING', approvals = [] } = {}) {
+function seedOrder(env, { soStatus = 'PENDING', approvals = [], isTest = 0 } = {}) {
   const db = env._db;
   db.exec(`INSERT INTO orders (id, shopify_order_id, financial_status, status) VALUES (1, 'S1', 'paid', 'READY_FOR_APPROVAL')`);
-  db.prepare(`INSERT INTO supplier_orders (id, order_id, supplier_id, status, items) VALUES (1, 1, 1, ?, ?)`).run(soStatus, JSON.stringify([{ sku: 'X', qty: 1 }]));
+  db.prepare(`INSERT INTO supplier_orders (id, order_id, supplier_id, status, items, is_test) VALUES (1, 1, 1, ?, ?, ?)`).run(soStatus, JSON.stringify([{ sku: 'X', qty: 1 }]), isTest);
   for (const st of approvals) db.prepare(`INSERT INTO approvals (order_id, supplier_order_id, stage, decision, approved_by) VALUES (1, 1, ?, 'APPROVED', 'owner')`).run(st);
 }
 
@@ -128,7 +128,7 @@ test('missing settings table -> every money path fails closed (request errors, n
 
 test('kill switch OFF: purchase still blocked without both approvals (even if status says payment pending)', async () => {
   const env = makeEnv({ killSwitch: '{"active":false}' });
-  seedOrder(env, { soStatus: 'PAYMENT_PENDING_SUPPLIER', approvals: [1] });
+  seedOrder(env, { soStatus: 'PAYMENT_PENDING_SUPPLIER', approvals: [1], isTest: 1 });
   const r = await call(env, 'POST', '/api/supplier-orders/1/purchase', { supplier_order_number: 'N1', transaction_confirmation: 'T1' });
   assert.equal(r.status, 409); assert.equal(r.json.error, 'two_approvals_required');
   assert.equal(env._db.prepare('SELECT COUNT(*) n FROM supplier_purchases').get().n, 0);
@@ -136,11 +136,39 @@ test('kill switch OFF: purchase still blocked without both approvals (even if st
 
 test('kill switch OFF: approval #2 without approval #1 is refused; purchase without evidence refused', async () => {
   const env = makeEnv({ killSwitch: '{"active":false}' });
-  seedOrder(env, { soStatus: 'APPROVED' });
+  seedOrder(env, { soStatus: 'APPROVED', isTest: 1 });
   const r2 = await call(env, 'POST', '/api/approvals', { supplier_order_id: 1, stage: 2, decision: 'APPROVED', approved_by: 'owner' });
-  assert.equal(r2.status, 409);
+  assert.equal(r2.status, 409); assert.equal(r2.json.error, 'stage1_not_approved');
   const p = await call(env, 'POST', '/api/supplier-orders/1/purchase', {});
   assert.equal(p.status, 400);
+});
+
+test('central guard: REAL (non-test) orders blocked on approval #1/#2, checkout draft, purchase even with kill switch OFF', async () => {
+  const cases = [
+    ['PENDING', [], 'POST', '/api/approvals', { supplier_order_id: 1, stage: 1, decision: 'APPROVED', approved_by: 'owner' }, 'approval_1'],
+    ['APPROVED', [1], 'POST', '/api/approvals', { supplier_order_id: 1, stage: 2, decision: 'APPROVED', approved_by: 'owner' }, 'approval_2'],
+    ['APPROVED', [1], 'POST', '/api/supplier-orders/1/checkout-draft', {}, 'checkout_draft'],
+    ['PAYMENT_PENDING_SUPPLIER', [1, 2], 'POST', '/api/supplier-orders/1/purchase', { supplier_order_number: 'N1', transaction_confirmation: 'T1' }, 'purchase'],
+  ];
+  for (const [soStatus, approvals, method, path, body, action] of cases) {
+    const env = makeEnv({ killSwitch: '{"active":false}' });
+    seedOrder(env, { soStatus, approvals, isTest: 0 });
+    const r = await call(env, method, path, body);
+    assert.equal(r.status, 423, `${action} must be blocked`);
+    assert.equal(r.json.error, 'sellable_gate_required'); assert.equal(r.json.action, action);
+    assert.equal(env._db.prepare('SELECT status FROM supplier_orders WHERE id = 1').get().status, soStatus, 'state unchanged');
+    assert.equal(env._db.prepare('SELECT COUNT(*) n FROM supplier_purchases').get().n, 0);
+    assert.equal(env._db.prepare('SELECT COUNT(*) n FROM approvals').get().n, approvals.length);
+  }
+});
+
+test('central guard: unknown action is refused; test orders pass only when kill switch is OFF', async () => {
+  const env = makeEnv({ killSwitch: '{"active":false}' });
+  assert.equal((await worker.__guardAction(env.DB, env, 'refund', {})).ok, false);
+  assert.equal((await worker.__guardAction(env.DB, env, 'purchase', { so: { is_test: 1 } })).ok, true);
+  assert.equal((await worker.__guardAction(env.DB, env, 'purchase', { so: { is_test: 0 } })).error, 'sellable_gate_required');
+  const envOn = makeEnv({ killSwitch: 'ON' });
+  assert.equal((await worker.__guardAction(envOn.DB, envOn, 'purchase', { so: { is_test: 1 } })).error, 'kill_switch_blocked');
 });
 
 test('webhook with kill switch ON (or malformed) only queues the order; no procurement', async () => {

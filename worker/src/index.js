@@ -1479,6 +1479,30 @@ async function killSwitchBlock(db, action) {
   );
 }
 __name(killSwitchBlock, "killSwitchBlock");
+// SPORTPRO: single central guard for every money / write action.
+// Order: kill switch -> action preconditions -> SELLABLE gate. Anything not explicitly allowed is blocked.
+// The SELLABLE gate (src/core/eligibility.js + actionGuard.js) is not wired into this legacy schema,
+// so REAL (non-test) orders are blocked until it is. Only is_test orders may move (staging E2E).
+const GUARDED_ACTIONS = ["approval_1", "approval_2", "checkout_draft", "purchase", "shopify_mutation"];
+async function guardAction(db, env2, action, ctx = {}) {
+  if (!GUARDED_ACTIONS.includes(action)) return { ok: false, error: "unknown_action", action };
+  const ks = await readKillSwitch(db);
+  if (ks.state !== "OFF") return { ok: false, status: 423, error: "kill_switch_blocked", action, kill_switch: ks.state, reason: ks.reason };
+  if (action === "shopify_mutation") {
+    if (!env2 || env2.SHOPIFY_WRITES_ENABLED !== "true") return { ok: false, error: "writes_disabled", action };
+    return { ok: true };
+  }
+  const so = ctx.so;
+  if (!so) return { ok: false, status: 404, error: "not_found", action };
+  if (so.is_test !== 1) return { ok: false, status: 423, error: "sellable_gate_required", action, reason: "real_orders_blocked_until_sellable_gate_is_wired" };
+  return { ok: true };
+}
+__name(guardAction, "guardAction");
+function guardResponse(g) {
+  const { ok, status, ...rest } = g;
+  return Response.json(rest, { status: status || 423 });
+}
+__name(guardResponse, "guardResponse");
 async function getSettings(db) {
   const rows = await db.prepare("SELECT key, value FROM system_settings").all();
   const s = {};
@@ -1687,9 +1711,8 @@ async function getAdminToken(env2) {
 __name(getAdminToken, "getAdminToken");
 async function shopifyGraphQL(env2, query, variables = {}) {
   if (/^\s*mutation\b/i.test(String(query))) {
-    if (env2.SHOPIFY_WRITES_ENABLED !== "true") throw new Error("shopify_mutation_blocked:writes_disabled");
-    const ks = await readKillSwitch(env2.DB);
-    if (ks.state !== "OFF") throw new Error(`shopify_mutation_blocked:kill_switch_${ks.state}`);
+    const g = await guardAction(env2.DB, env2, "shopify_mutation");
+    if (!g.ok) throw new Error(`shopify_mutation_blocked:${g.error === "kill_switch_blocked" ? "kill_switch_" + g.kill_switch : g.error}`);
   }
   const token = await getAdminToken(env2);
   const resp = await fetch(`https://${env2.SHOPIFY_SHOP_DOMAIN}/admin/api/2025-01/graphql.json`, {
@@ -3366,6 +3389,8 @@ async function handleOrdersApi(request, env2, url) {
         WHERE so.id = ?`
     ).bind(id).first();
     if (!so) return Response.json({ error: "not_found" }, { status: 404 });
+    const gDraft = await guardAction(db, env2, "checkout_draft", { so });
+    if (!gDraft.ok) return guardResponse(gDraft);
     const st = canonicalStatus(so.status);
     if (st !== "APPROVED") {
       return Response.json({ error: `stage1_not_approved:${so.status}`, code: 409 }, { status: 409 });
@@ -3438,6 +3463,8 @@ async function handleOrdersApi(request, env2, url) {
     if (existing) return Response.json({ error: "already_purchased" }, { status: 409 });
     const so = await db.prepare("SELECT * FROM supplier_orders WHERE id = ?").bind(id).first();
     if (!so) return Response.json({ error: "not_found" }, { status: 404 });
+    const gPurchase = await guardAction(db, env2, "purchase", { so });
+    if (!gPurchase.ok) return guardResponse(gPurchase);
     if (canonicalStatus(so.status) !== "PAYMENT_PENDING_SUPPLIER") {
       return Response.json({ error: `awaiting_payment_required:${so.status}` }, { status: 409 });
     }
@@ -5139,6 +5166,8 @@ async function handleApi(request, env2, url) {
     }
     const so = await db.prepare("SELECT * FROM supplier_orders WHERE id = ?").bind(supplier_order_id).first();
     if (!so) return Response.json({ error: "not_found" }, { status: 404 });
+    const gApproval = await guardAction(db, env2, stage === 2 ? "approval_2" : "approval_1", { so });
+    if (!gApproval.ok) return guardResponse(gApproval);
     const dup = await db.prepare(
       `SELECT id FROM approvals WHERE supplier_order_id = ? AND stage = ? AND decision = ?`
     ).bind(supplier_order_id, stage, decision).first();
@@ -5317,6 +5346,7 @@ export {
   ProcurementLock,
   index_default as default,
   parseKillSwitch as __parseKillSwitch,
-  shopifyGraphQL as __shopifyGraphQL
+  shopifyGraphQL as __shopifyGraphQL,
+  guardAction as __guardAction
 };
 //# sourceMappingURL=index.js.map
